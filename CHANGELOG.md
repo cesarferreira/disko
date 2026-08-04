@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.0] - 2026-08-04
+## [0.4.0] - 2026-08-04
 
 ### 🚀 Features
 
@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - Gate the Linux-only volume-label lookup behind cfg(target_os)
 - Deleting no longer freezes the interface
 - Fixed makefile
+- Scope release changelog hook
 
 ### 💼 Other
 
