@@ -279,6 +279,12 @@ pub fn history(
     )
 }
 
+/// The last thing disko knew about `path`, for painting a screen before the
+/// fresh scan has finished.
+pub fn last_snapshot(path: &Path) -> Option<disko_core::Snapshot> {
+    Store::open().ok()?.latest(path)
+}
+
 /// Compare a fresh scan against the last snapshot, then record it.
 ///
 /// Order matters: recording first would leave the newest snapshot equal to the

@@ -115,6 +115,41 @@ Growth since the moment you started watching, updated live — for when a build,
 a download or an agent is filling the disk right now and you want to see which
 directory is doing it.
 
+### It opens instantly
+
+disko paints the last snapshot the moment you open it, labelled for what it is,
+and corrects itself as the fresh scan lands a fraction of a second later:
+
+```text
+ Current folder: ~/code    78 GB    as of 2 hours ago · rescanning…
+
+   41 GB  monorepo   ████████████████▉   52.7%
+   18 GB  .cache     ███████▋            23.6%
+   18 GB  models     ███████▌            23.6%
+```
+
+On a first scan there is nothing to paint from, so the progress screen shows
+what has actually been counted so far instead of a bare spinner:
+
+```text
+  ⠙  113689 items · 62 GB · 2s
+     ~/code/.cache/bazel/63bf4…/site-packages/urllib3
+
+  Biggest so far
+     40 GB   ~/code/monorepo/.git
+     56 MB   ~/code/monorepo/services
+```
+
+Those are finished directories, not running estimates — each number is final
+for that folder. The list is incomplete, never wrong.
+
+disko deliberately does *not* cache scans to make them faster. It cannot be
+done correctly: appending 10 MB to a file changes no directory's mtime, so any
+cache keyed on directory timestamps silently reports stale sizes, and validating
+one properly means stat-ing every file — which is the scan. The kernel's dentry
+cache already does this job well, which is why a repeat scan of 700k entries
+takes 0.6 seconds.
+
 ## What can I delete
 
 ```console

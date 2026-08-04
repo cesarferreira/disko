@@ -167,7 +167,16 @@ fn draw_current_folder(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
-    if let Some(note) = incomplete_note(entry) {
+    // Numbers from a snapshot are real, just old. Saying so is the whole
+    // difference between showing them and misleading with them.
+    if let Some(taken_at) = app.provisional {
+        let age = disko_core::history::now().saturating_sub(taken_at);
+        spans.push(Span::raw("    "));
+        spans.push(Span::styled(
+            format!("as of {} · rescanning…", crate::timefmt::ago(age)),
+            theme::warning(),
+        ));
+    } else if let Some(note) = incomplete_note(entry) {
         spans.push(Span::raw("    "));
         spans.push(Span::styled(note, theme::warning()));
     }

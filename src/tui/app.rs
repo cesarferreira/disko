@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use disko_core::scan::{self, Cancel, Progress};
+use disko_core::scan::{self, Cancel, Finished, Progress};
 use disko_core::{Diff, DiskEntry, Filesystem, ScanOptions, SizeKind, Unit};
 use disko_render::{RadialNode, palette};
 
@@ -16,6 +16,13 @@ use crate::model::{self, Metric, Row, RowOptions, Sort};
 
 /// The word that has to be typed before anything is removed.
 pub const CONFIRM_WORD: &str = "delete";
+
+/// How far down a running scan publishes finished directories. Two levels is
+/// enough that a scan of `/` shows `~/Library` long before `/` itself is done.
+const STREAM_DEPTH: usize = 2;
+
+/// How many finished directories to keep on the progress screen.
+const STREAM_KEEP: usize = 12;
 
 /// A pending deletion, waiting to be confirmed or called off.
 #[derive(Clone, Debug, Default)]
@@ -140,6 +147,11 @@ pub struct App {
     pub outcomes: Vec<Outcome>,
     /// When set, disko will not delete anything at all.
     pub read_only: bool,
+    /// When the numbers on screen came from a stored snapshot rather than the
+    /// scan that is still running: the moment that snapshot was taken.
+    pub provisional: Option<u64>,
+    /// Directories the running scan has finished counting, largest first.
+    pub streamed: Vec<Finished>,
     session: Option<Session>,
     mode: ScanMode,
 }
@@ -171,6 +183,8 @@ impl App {
             confirm: None,
             outcomes: Vec::new(),
             read_only: false,
+            provisional: None,
+            streamed: Vec::new(),
             session: None,
             mode: ScanMode::Fresh,
         }
@@ -218,11 +232,27 @@ impl App {
             self.search_active = false;
             self.tree = None;
             self.status = None;
+            self.streamed.clear();
+            self.provisional = None;
             self.view = View::Scanning;
+
+            // Paint what disko knew last time straight away, clearly labelled,
+            // and let the scan correct it. Waiting on a spinner for numbers we
+            // already have is a second nobody needs to spend.
+            if self.settings.record_snapshots
+                && let Some(snapshot) = crate::commands::last_snapshot(&path)
+            {
+                self.tree = Some(snapshot.tree);
+                self.provisional = Some(snapshot.taken_at);
+                self.view = View::Overview;
+            }
         }
 
-        let (progress, cancel, handle) =
-            scan::scan_in_background(path, self.settings.scan_options.clone());
+        let (progress, cancel, handle) = scan::scan_in_background_streaming(
+            path,
+            self.settings.scan_options.clone(),
+            STREAM_DEPTH,
+        );
         self.session = Some(Session {
             progress,
             cancel,
@@ -259,6 +289,8 @@ impl App {
 
     /// Collect a finished scan. Called once per frame; cheap while running.
     pub fn poll_scan(&mut self) {
+        self.collect_streamed();
+
         let Some(session) = &mut self.session else {
             return;
         };
@@ -288,6 +320,30 @@ impl App {
             }
         }
         self.session = None;
+    }
+
+    /// Absorb whatever the running scan has finished counting since the last
+    /// frame, keeping the largest first.
+    fn collect_streamed(&mut self) {
+        let Some(session) = &self.session else { return };
+        let fresh = session.progress.drain_completed();
+        if fresh.is_empty() {
+            return;
+        }
+
+        self.streamed.extend(fresh);
+        // A parent supersedes children it already contains, so the list stays
+        // a set of non-overlapping totals rather than double-counting.
+        self.streamed
+            .sort_by_key(|done| std::cmp::Reverse(done.allocated));
+        let mut kept: Vec<Finished> = Vec::with_capacity(self.streamed.len());
+        for done in std::mem::take(&mut self.streamed) {
+            if !kept.iter().any(|other| done.path.starts_with(&other.path)) {
+                kept.push(done);
+            }
+        }
+        kept.truncate(STREAM_KEEP);
+        self.streamed = kept;
     }
 
     /// Take a finished scan: work out what changed, then remember it.
@@ -326,9 +382,21 @@ impl App {
         }
 
         self.tree = Some(tree);
+        // Whatever is on screen is now the real thing.
+        self.provisional = None;
+        self.streamed.clear();
         if self.mode == ScanMode::Fresh {
             self.view = View::Overview;
         }
+        // A snapshot's tree is pruned, so the cursor may have been sitting on
+        // a row that the full scan renders differently.
+        let rows = self.rows().len();
+        self.selection = self.selection.min(rows.saturating_sub(1));
+    }
+
+    /// True while the screen is showing last-known numbers.
+    pub fn is_provisional(&self) -> bool {
+        self.provisional.is_some() && self.session.is_some()
     }
 
     /// Switch between "what is big" and "what changed".

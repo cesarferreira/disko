@@ -32,10 +32,15 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     .horizontal_margin(1)
     .split(area);
 
-    frame.render_widget(
-        Paragraph::new(Span::styled(app.breadcrumb(), theme::heading())),
-        chunks[0],
-    );
+    let mut crumbs = vec![Span::styled(app.breadcrumb(), theme::heading())];
+    if let Some(taken_at) = app.provisional {
+        let age = disko_core::history::now().saturating_sub(taken_at);
+        crumbs.push(Span::styled(
+            format!("   as of {} · rescanning…", crate::timefmt::ago(age)),
+            theme::warning(),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(crumbs)), chunks[0]);
 
     let legend_width = LEGEND_WIDTH.min(chunks[2].width.saturating_sub(20));
     let body = Layout::horizontal([Constraint::Min(20), Constraint::Length(legend_width)])
