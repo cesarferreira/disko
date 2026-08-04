@@ -52,6 +52,11 @@ clap = { version = "4", features = ["derive"] }
 unicode-width = "0.2"
 jiff = "0.2.35"
 
+[package.metadata.release]
+# This hook belongs only to the root package. A workspace-level hook would run
+# once for each member and create CHANGELOG.md files inside the sub-crates.
+pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "v{{version}}"]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
