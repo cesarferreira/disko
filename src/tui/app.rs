@@ -11,7 +11,7 @@ use disko_core::scan::{self, Cancel, Finished, Progress};
 use disko_core::{Diff, DiskEntry, Filesystem, ScanOptions, SizeKind, Unit};
 use disko_render::{RadialNode, palette};
 
-use crate::deletion::{self, Outcome, Target};
+use crate::deletion::{self, DeleteProgress, Outcome, Target};
 use crate::model::{self, Metric, Row, RowOptions, Sort};
 
 /// The word that has to be typed before anything is removed.
@@ -108,6 +108,21 @@ enum ScanMode {
     Refresh,
 }
 
+/// A deletion running on another thread, so the interface stays alive while
+/// tens of thousands of files are being unlinked.
+pub struct Deleting {
+    pub progress: Arc<DeleteProgress>,
+    cancel: Cancel,
+    handle: Option<JoinHandle<Vec<Outcome>>>,
+    stopping: bool,
+}
+
+impl Deleting {
+    pub fn is_stopping(&self) -> bool {
+        self.stopping
+    }
+}
+
 /// A scan running on another thread.
 struct Session {
     progress: Arc<Progress>,
@@ -152,6 +167,9 @@ pub struct App {
     pub provisional: Option<u64>,
     /// Directories the running scan has finished counting, largest first.
     pub streamed: Vec<Finished>,
+    /// A deletion in flight.
+    pub deleting: Option<Deleting>,
+    tick: usize,
     session: Option<Session>,
     mode: ScanMode,
 }
@@ -185,6 +203,8 @@ impl App {
             read_only: false,
             provisional: None,
             streamed: Vec::new(),
+            deleting: None,
+            tick: 0,
             session: None,
             mode: ScanMode::Fresh,
         }
@@ -259,6 +279,11 @@ impl App {
             handle: Some(handle),
             started: Instant::now(),
         });
+    }
+
+    /// Advance the animation clock. Called once per frame.
+    pub fn advance(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
     }
 
     /// Kick off a rescan when the watch interval is up.
@@ -392,6 +417,12 @@ impl App {
         // a row that the full scan renders differently.
         let rows = self.rows().len();
         self.selection = self.selection.min(rows.saturating_sub(1));
+    }
+
+    /// Frame counter, so overlays can animate without threading it through
+    /// every draw call.
+    pub fn tick(&self) -> usize {
+        self.tick
     }
 
     /// True while the screen is showing last-known numbers.
@@ -598,6 +629,10 @@ impl App {
     }
 
     /// Go through with it, if the word has been typed in full.
+    ///
+    /// The work happens on another thread: unlinking a few hundred thousand
+    /// files takes long enough that doing it here would freeze the screen with
+    /// no way to tell whether anything was happening.
     pub fn commit_delete(&mut self) {
         let Some(confirm) = &mut self.confirm else {
             return;
@@ -609,9 +644,55 @@ impl App {
 
         let targets = std::mem::take(&mut confirm.targets);
         self.confirm = None;
+        self.outcomes.clear();
 
-        let Some(tree) = &mut self.tree else { return };
-        let outcomes = deletion::delete_all(&targets, &self.root, tree);
+        let (progress, cancel, handle) = deletion::delete_in_background(targets, self.root.clone());
+        self.deleting = Some(Deleting {
+            progress,
+            cancel,
+            handle: Some(handle),
+            stopping: false,
+        });
+    }
+
+    /// Ask the running deletion to stop once it finishes the file it is on.
+    pub fn stop_delete(&mut self) {
+        if let Some(deleting) = &mut self.deleting {
+            deleting.cancel.cancel();
+            deleting.stopping = true;
+        }
+    }
+
+    /// Collect a finished deletion and fold the result back into the tree.
+    pub fn poll_delete(&mut self) {
+        let Some(deleting) = &mut self.deleting else {
+            return;
+        };
+        let done = deleting
+            .handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished());
+        if !done {
+            return;
+        }
+
+        let Some(handle) = deleting.handle.take() else {
+            return;
+        };
+        let outcomes = handle.join().unwrap_or_default();
+        self.deleting = None;
+        self.apply_outcomes(outcomes);
+    }
+
+    fn apply_outcomes(&mut self, outcomes: Vec<Outcome>) {
+        // Correct the totals in place rather than paying for a rescan.
+        if let Some(tree) = &mut self.tree {
+            for outcome in &outcomes {
+                if let Outcome::Deleted { path, .. } = outcome {
+                    tree.remove(path);
+                }
+            }
+        }
 
         let freed = deletion::freed(&outcomes);
         let deleted = outcomes

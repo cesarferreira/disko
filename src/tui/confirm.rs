@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::model::display_path;
-use crate::tui::app::{App, CONFIRM_WORD, Confirm};
+use crate::tui::app::{App, CONFIRM_WORD, Confirm, Deleting};
 use crate::tui::text::truncate;
 use crate::tui::theme;
 
@@ -116,3 +116,74 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         height,
     }
 }
+
+/// Shown while a deletion is running, so the screen never looks stuck.
+///
+/// The counters move even while a single enormous directory is being cleared,
+/// which is the case that made the old blocking version look frozen.
+pub fn draw_progress(frame: &mut Frame, area: Rect, app: &App, deleting: &Deleting) {
+    let unit = app.settings.unit;
+    let progress = &deleting.progress;
+
+    let width = 68u16.min(area.width);
+    let height = 8u16.min(area.height);
+    let popup = centered(area, width, height);
+    frame.render_widget(Clear, popup);
+
+    let danger = Style::default()
+        .fg(Color::Rgb(213, 94, 0))
+        .add_modifier(Modifier::BOLD);
+
+    let spinner = SPINNER[(app.tick() / 2) % SPINNER.len()];
+    let done = progress.items_done();
+    let total = progress.items_total();
+
+    let heading = if deleting.is_stopping() {
+        format!("{spinner} Stopping after this one…")
+    } else {
+        format!("{spinner} Deleting {} of {total}", (done + 1).min(total))
+    };
+
+    let inner = width.saturating_sub(4) as usize;
+    let lines = vec![
+        Line::from(Span::styled(heading, danger)),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(" ", theme::muted()),
+            Span::raw(truncate(
+                &display_path(&progress.current()),
+                inner.saturating_sub(1),
+            )),
+        ]),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(" freed ", theme::muted()),
+            Span::styled(format(progress.freed(), unit), theme::heading()),
+            Span::styled("  ·  ", theme::muted()),
+            Span::styled(
+                format!("{} files removed", progress.files_removed()),
+                theme::secondary(),
+            ),
+        ]),
+        Line::from(Span::styled(
+            if deleting.is_stopping() {
+                " finishing the current item…"
+            } else {
+                " Esc to stop after the current item"
+            },
+            theme::muted(),
+        )),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(danger)
+                .title(" Deleting "),
+        ),
+        popup,
+    );
+}
+
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
