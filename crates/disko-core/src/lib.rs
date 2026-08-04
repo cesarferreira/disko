@@ -21,11 +21,17 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
+pub mod categories;
+pub mod diff;
+pub mod history;
 pub mod mounts;
 pub mod scan;
 pub mod size;
 pub mod tree;
 
+pub use categories::{Candidate, Rule, Safety};
+pub use diff::{Change, ChangeKind, Diff};
+pub use history::{Snapshot, Store};
 pub use mounts::{Filesystem, Inodes};
 pub use scan::{Cancel, Progress, ScanOptions};
 pub use size::{SizeKind, Unit};

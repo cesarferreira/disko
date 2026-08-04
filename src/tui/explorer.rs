@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::model::Row;
+use crate::report::signed;
 use crate::tui::app::App;
 use crate::tui::text::{fit, width};
 use crate::tui::theme;
@@ -131,7 +132,10 @@ fn draw_hole(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let name = entry.name().to_string();
-    let size = format(entry.size(app.settings.size_kind), app.settings.unit);
+    let size = match (app.showing_growth(), &app.diff) {
+        (true, Some(diff)) => signed(diff.total_delta(), app.settings.unit),
+        _ => format(entry.size(app.settings.size_kind), app.settings.unit),
+    };
     let box_width = (width(&name).max(width(&size)) as u16 + 2).min(area.width);
     if box_width == 0 || area.height < 4 {
         return;
@@ -165,9 +169,24 @@ fn draw_legend(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
     let offset = app.selection.saturating_sub(capacity.saturating_sub(1));
     let visible = rows.iter().skip(offset).take(capacity);
 
+    let growth = app.showing_growth();
+    let scale = rows
+        .iter()
+        .map(|row| row.delta.unwrap_or(0).abs())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let amount = |row: &Row| -> String {
+        if growth {
+            signed(row.delta.unwrap_or(0), unit)
+        } else {
+            format(row.size, unit)
+        }
+    };
+
     let size_width = rows
         .iter()
-        .map(|row| width(&format(row.size, unit)))
+        .map(|row| width(&amount(row)))
         .max()
         .unwrap_or(8);
     let name_width = (area.width as usize).saturating_sub(size_width + 5);
@@ -175,7 +194,11 @@ fn draw_legend(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
     let lines: Vec<Line> = visible
         .enumerate()
         .map(|(index, row)| {
-            let color = palette::categorical(row.color_index);
+            let color = if growth {
+                palette::growth_color(row.delta.unwrap_or(0), scale)
+            } else {
+                palette::categorical(row.color_index)
+            };
             let is_selected = offset + index == app.selection;
             let marked = row
                 .path
@@ -192,10 +215,7 @@ fn draw_legend(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
                 Span::styled("■ ", Style::default().fg(theme::color(color))),
                 Span::styled(fit(&row.name, name_width), name_style),
                 Span::raw(" "),
-                Span::styled(
-                    format!("{:>size_width$}", format(row.size, unit)),
-                    theme::secondary(),
-                ),
+                Span::styled(format!("{:>size_width$}", amount(row)), theme::secondary()),
                 Span::styled(if marked { " ✓" } else { "" }, theme::accent()),
             ])
         })

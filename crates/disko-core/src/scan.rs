@@ -21,6 +21,13 @@ pub struct ScanOptions {
     pub max_depth: Option<usize>,
     /// Count a hard-linked file once, under the first path that reaches it.
     pub dedup_hardlinks: bool,
+    /// Do not walk into network filesystems — NFS, SMB, sshfs, blobfuse and
+    /// friends. Their contents are not on this disk, and stat-ing them one
+    /// round trip at a time turns a one-second scan into a ten-minute one.
+    ///
+    /// A network mount named explicitly as the scan root is still scanned:
+    /// asking for it is asking for it.
+    pub skip_remote: bool,
 }
 
 impl Default for ScanOptions {
@@ -29,6 +36,7 @@ impl Default for ScanOptions {
             one_file_system: false,
             max_depth: None,
             dedup_hardlinks: true,
+            skip_remote: true,
         }
     }
 }
@@ -111,11 +119,17 @@ struct Ctx<'a> {
     progress: &'a Progress,
     cancel: &'a Cancel,
     root_device: u64,
+    /// Mount points to stop at, resolved once before the walk starts.
+    remote_mounts: Vec<PathBuf>,
     /// (device, inode) pairs already counted, for hard-link dedup.
     seen_links: Mutex<HashSet<(u64, u64)>>,
 }
 
 impl Ctx<'_> {
+    fn is_remote_mount(&self, path: &Path) -> bool {
+        self.remote_mounts.iter().any(|mount| mount == path)
+    }
+
     /// True the first time this inode is seen, false for every later link.
     fn first_sighting(&self, meta: &Metadata) -> bool {
         match self.seen_links.lock() {
@@ -141,11 +155,23 @@ pub fn scan(
     let meta =
         fs::symlink_metadata(&root).with_context(|| format!("cannot stat {}", root.display()))?;
 
+    let remote_mounts = if options.skip_remote {
+        crate::mounts::remote_mount_points()
+            .into_iter()
+            // Scanning a network mount on purpose is allowed; wandering into
+            // one by accident is what this guards against.
+            .filter(|mount| mount != &root)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let ctx = Ctx {
         options,
         progress,
         cancel,
         root_device: device_of(&meta),
+        remote_mounts,
         seen_links: Mutex::new(HashSet::new()),
     };
 
@@ -188,6 +214,7 @@ fn scan_dir(path: &Path, meta: &Metadata, depth: usize, ctx: &Ctx) -> DiskEntry 
     // it stays out of the apparent total — the same split `du` makes between
     // its default output and `--apparent-size`.
     entry.allocated_size = allocated_of(meta);
+    entry.modified = modified_of(meta);
     ctx.progress.saw_entry(entry.allocated_size);
 
     if ctx.cancel.is_cancelled() {
@@ -222,8 +249,11 @@ fn scan_dir(path: &Path, meta: &Metadata, depth: usize, ctx: &Ctx) -> DiskEntry 
                 return Some(leaf_entry(child_path, &child_meta, ctx));
             }
 
-            if ctx.options.one_file_system && device_of(&child_meta) != ctx.root_device {
+            let crosses_filesystem =
+                ctx.options.one_file_system && device_of(&child_meta) != ctx.root_device;
+            if crosses_filesystem || ctx.is_remote_mount(&child_path) {
                 let mut skipped = DiskEntry::new(child_path, EntryType::Directory);
+                skipped.modified = modified_of(&child_meta);
                 skipped.scan_state = ScanState::Skipped;
                 return Some(skipped);
             }
@@ -257,6 +287,7 @@ fn leaf_entry(path: PathBuf, meta: &Metadata, ctx: &Ctx) -> DiskEntry {
     };
 
     let mut entry = DiskEntry::new(path, entry_type);
+    entry.modified = modified_of(meta);
 
     // A hard link seen a second time contributes nothing: the blocks were
     // already counted under the path that reached it first.
@@ -269,6 +300,15 @@ fn leaf_entry(path: PathBuf, meta: &Metadata, ctx: &Ctx) -> DiskEntry {
     entry.allocated_size = allocated_of(meta);
     ctx.progress.saw_entry(entry.allocated_size);
     entry
+}
+
+/// Seconds since the Unix epoch, or 0 when the filesystem will not say.
+fn modified_of(meta: &Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]

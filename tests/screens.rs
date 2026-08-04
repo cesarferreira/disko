@@ -77,6 +77,8 @@ fn app() -> App {
             top: 20,
             scan_options: ScanOptions::default(),
             show_all_filesystems: false,
+            // Tests must never touch the user's real snapshot history.
+            record_snapshots: false,
         },
         false,
     );
@@ -293,5 +295,174 @@ fn a_scan_with_unreadable_folders_admits_it() {
     }
 
     let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
-    assert!(screen.contains("some folders unreadable"), "{screen}");
+    assert!(
+        screen.contains("some folders skipped or unreadable"),
+        "{screen}"
+    );
+}
+
+/// The state of the same machine a week earlier, for the growth view.
+fn macintosh_last_week() -> DiskEntry {
+    dir(
+        "/",
+        322 * GB,
+        vec![
+            dir(
+                "/Users",
+                211 * GB,
+                vec![dir(
+                    "/Users/cesar",
+                    209 * GB,
+                    vec![
+                        dir("/Users/cesar/Library", 25 * GB, vec![]),
+                        dir("/Users/cesar/Downloads", 48 * GB, vec![]),
+                        dir("/Users/cesar/code", 32 * GB, vec![]),
+                        dir("/Users/cesar/Movies", 19 * GB, vec![]),
+                    ],
+                )],
+            ),
+            dir("/Library", 84 * GB, vec![]),
+            dir("/System", 12 * GB, vec![]),
+            dir("/opt", 3 * GB, vec![]),
+        ],
+    )
+}
+
+/// An app that knows what changed over the last week.
+fn app_with_history() -> App {
+    let mut app = app();
+    let before = macintosh_last_week();
+    let after = macintosh();
+    app.diff = Some(disko_core::diff::diff(
+        &before,
+        &after,
+        SizeKind::Allocated,
+        1_800_000_000,
+        1_800_604_800,
+        0,
+    ));
+    app
+}
+
+#[test]
+fn pressing_t_without_a_previous_scan_explains_itself() {
+    let mut app = app();
+    press(&mut app, KeyCode::Char('t'));
+
+    assert!(!app.showing_growth());
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(screen.contains("no earlier scan"), "{screen}");
+}
+
+#[test]
+fn pressing_t_switches_the_whole_view_to_what_changed() {
+    let mut app = app_with_history();
+    press(&mut app, KeyCode::Char('t'));
+    assert!(app.showing_growth());
+
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+
+    // Signed changes, not absolute sizes, and the window they cover.
+    assert!(screen.contains("+82 GB"), "{screen}");
+    assert!(screen.contains("in 7 days"), "{screen}");
+    assert!(
+        screen.contains("+46 GB"),
+        "growth of Users should show\n{screen}"
+    );
+    // The capacity header still describes the filesystem, unchanged.
+    assert!(screen.contains("404 GB used of 494 GB"), "{screen}");
+}
+
+#[test]
+fn growth_mode_shows_both_directions() {
+    let mut app = app_with_history();
+    app.cwd = PathBuf::from("/");
+    press(&mut app, KeyCode::Char('t'));
+
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    // Applications is new this week; System did not move and is not listed.
+    assert!(screen.contains("Applications"), "{screen}");
+    assert!(
+        !screen.contains("System"),
+        "unchanged entries stay out\n{screen}"
+    );
+}
+
+#[test]
+fn growth_mode_survives_every_terminal_width() {
+    for width in [40u16, 60, 80, 100, 140] {
+        for view in [View::Overview, View::Explorer] {
+            let mut app = app_with_history();
+            app.view = view;
+            press(&mut app, KeyCode::Char('t'));
+            for line in render_lines(&mut app, width, 30).unwrap() {
+                assert!(
+                    line.chars().count() <= width as usize,
+                    "growth {view:?} at {width} columns overflowed: {line}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_explorer_charts_growth_when_growth_is_selected() {
+    let mut app = app_with_history();
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.view, View::Explorer);
+
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(
+        screen.contains('▀') || screen.contains('▄'),
+        "no chart\n{screen}"
+    );
+    // The hole carries the total change rather than the total size.
+    assert!(screen.contains("+82 GB"), "{screen}");
+    assert!(screen.contains("■"), "{screen}");
+}
+
+#[test]
+fn toggling_back_returns_to_sizes() {
+    let mut app = app_with_history();
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('t'));
+
+    assert!(!app.showing_growth());
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(screen.contains("Largest items"), "{screen}");
+    assert!(!screen.contains("+46 GB"), "{screen}");
+}
+
+#[test]
+fn the_details_panel_reports_what_changed_and_what_made_it() {
+    let mut app = app_with_history();
+    press(&mut app, KeyCode::Char('d'));
+
+    let screen = joined(&render_lines(&mut app, 110, 34).unwrap());
+    assert!(screen.contains("Change (7 days)"), "{screen}");
+    assert!(screen.contains("+46 GB"), "{screen}");
+    assert!(screen.contains("Current size"), "{screen}");
+}
+
+#[test]
+fn growth_is_advertised_in_the_footer() {
+    let screen = joined(&render_lines(&mut app(), 100, 30).unwrap());
+    assert!(screen.contains("t growth"), "{screen}");
+}
+
+/// Not an assertion — a way to eyeball the growth view during development.
+#[test]
+#[ignore = "visual check: cargo test -- --ignored --nocapture"]
+fn preview_growth() {
+    let mut app = app_with_history();
+    press(&mut app, KeyCode::Char('t'));
+    for line in render_lines(&mut app, 92, 22).unwrap() {
+        println!("|{line}");
+    }
+    println!();
+    press(&mut app, KeyCode::Enter);
+    for line in render_lines(&mut app, 92, 24).unwrap() {
+        println!("|{line}");
+    }
 }

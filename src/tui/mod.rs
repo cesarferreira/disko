@@ -72,6 +72,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
 
     loop {
         app.poll_scan();
+        app.tick_watch();
         terminal.draw(|frame| draw(frame, app, &mut ui, tick))?;
 
         if event::poll(FRAME)? {
@@ -232,6 +233,7 @@ fn handle_browsing(app: &mut App, key: KeyEvent) {
         KeyCode::Char('s') => app.cycle_sort(),
         KeyCode::Char('d') => app.details = !app.details,
         KeyCode::Char('a') => app.toggle_size_kind(),
+        KeyCode::Char('t') => app.toggle_metric(),
         KeyCode::Char(' ') => app.toggle_mark(),
         KeyCode::Char('r') => app.rescan(),
         _ => {}
@@ -266,6 +268,7 @@ mod tests {
                 top: 20,
                 scan_options: ScanOptions::default(),
                 show_all_filesystems: false,
+                record_snapshots: false,
             },
             false,
         );

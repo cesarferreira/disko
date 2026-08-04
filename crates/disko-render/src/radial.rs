@@ -16,6 +16,9 @@ pub struct RadialNode {
     pub id: usize,
     pub label: String,
     pub size: u64,
+    /// Overrides the palette for this wedge. The growth view uses it to colour
+    /// by what changed instead of by which child it is.
+    pub color: Option<Rgb>,
     pub children: Vec<RadialNode>,
 }
 
@@ -25,6 +28,7 @@ impl RadialNode {
             id,
             label: label.into(),
             size,
+            color: None,
             children: Vec::new(),
         }
     }
@@ -116,9 +120,12 @@ fn place(
         // Top-level children each get their own hue; deeper rings are lighter
         // shades of their parent, alternating slightly so neighbouring
         // siblings do not melt into one another.
-        let color = match parent_color {
-            None => palette::categorical(index),
-            Some(parent) => palette::shade(parent, 1.18 + if index % 2 == 0 { 0.0 } else { 0.10 }),
+        let color = match (node.color, parent_color) {
+            (Some(explicit), _) => explicit,
+            (None, None) => palette::categorical(index),
+            (None, Some(parent)) => {
+                palette::shade(parent, 1.18 + if index % 2 == 0 { 0.0 } else { 0.10 })
+            }
         };
 
         if span >= options.min_span {
@@ -339,6 +346,7 @@ mod tests {
             id,
             label: format!("n{id}"),
             size,
+            color: None,
             children,
         }
     }
@@ -366,6 +374,16 @@ mod tests {
         assert!(child.start >= parent.start && child.end <= parent.end + 1e-9);
         // Half of a half is a quarter of the circle.
         assert!((child.span() - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_explicit_colour_overrides_the_palette() {
+        let mut root = node(0, 100, vec![node(1, 100, vec![])]);
+        let chosen = Rgb::new(1, 2, 3);
+        root.children[0].color = Some(chosen);
+
+        let segments = layout(&root, &LayoutOptions::default());
+        assert_eq!(segments[0].color, chosen);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 <div align="center">
   <h1>disko</h1>
 
-  <p><strong>Disk usage TUI that shows what is full and what is using it</strong></p>
+  <p><strong>Not just where your space went, but when and why</strong></p>
 
   <p>
     <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
@@ -13,50 +13,41 @@
   <p>
     <a href="#install">Install</a>
     &nbsp;·&nbsp;
-    <a href="#quickstart">Quickstart</a>
+    <a href="#what-changed">What changed</a>
     &nbsp;·&nbsp;
-    <a href="#usage">Usage</a>
+    <a href="#what-can-i-delete">What can I delete</a>
+    &nbsp;·&nbsp;
+    <a href="#exploring">Exploring</a>
     &nbsp;·&nbsp;
     <a href="#library">Library</a>
-    &nbsp;·&nbsp;
-    <a href="#development">Development</a>
   </p>
 </div>
 
 ---
 
-`df` tells you a disk is 82% full. `du` tells you which directory is big. Neither
-tells you *where to go next*, and both answer in filesystem language when the
-question was about your laptop.
+`du` and `dust` tell you what is large **now**. `df` tells you a disk is 82% full.
+Neither answers the question you actually have at 2am:
 
-disko answers three questions on one screen — **what is full, what is using the
-space, and where should I look next** — and keeps device nodes, inode counts and
-filesystem types behind a key press.
+> My disk was fine two days ago. **What happened?**
 
-```
- Macintosh HD                                      404 GB used of 494 GB
- ████████████████████████████████████████░░░░░░░░  82%
+disko records a snapshot every time it scans, so it can tell you.
 
- Current folder: /    404 GB
+```console
+$ disko diff --since 7d
 
-   257 GB  Users         ████████████████████▍             63.6%
-    84 GB  Library       ██████▋                           20.8%
-    34 GB  Applications  ██▊                                8.4%
-    12 GB  System        █                                    3%
-     4 GB  private       ▍                                    1%
-     3 GB  opt           ▎                                  0.7%
+ disko — +82 GB added since Monday, 14:32 (7 days)
 
- Largest items
-   71 GB   ~/Library
-   48 GB   ~/Downloads
-   32 GB   ~/code
-   19 GB   ~/Movies
+  +46 GB  ~/Library/Developer/Xcode/DerivedData
+  +18 GB  ~/.gradle/caches
+  +11 GB  ~/Downloads
+   +7 GB  ~/Library/Containers/com.docker.docker/Data  (new)
 
- Enter explore   → open   ← up   / search   s sort   d details   q quit
+ 322 GB → 404 GB
 ```
 
-Press `Enter` and the same data becomes a DaisyDisk-style sunburst you can walk
-into, with the legend keeping every wedge tied to a name and a size.
+Not "your home directory grew 82 GB", which you already knew. disko follows the
+growth down to the directory that actually owns it, and stops when it reaches
+something worth naming.
 
 ## Install
 
@@ -83,7 +74,82 @@ make install-release
 
 </details>
 
-## Quickstart
+## What changed
+
+Every full scan writes a snapshot to `~/.local/share/disko` (a few KB each, 64
+kept per directory). Nothing to set up: by the time you think to ask what
+happened, the evidence already exists.
+
+```bash
+disko diff                # since the previous scan
+disko diff --since 7d     # since a week ago
+disko diff ~/ --since 3mo # a specific directory, a specific window
+disko history             # every snapshot, and what moved between them
+```
+
+Inside the TUI, press **`t`** and the same data becomes the view: growth glows,
+shrinking directories cool to blue, everything that did not move recedes into
+the background.
+
+```text
+ Macintosh HD                                          404 GB used of 494 GB
+ ████████████████████████████████████████████░░░░░░░░  82%
+
+ Current folder: /    404 GB    +82 GB in 7 days
+
+   +46 GB  Users         ████████████████████████████████     257 GB
+   +34 GB  Applications  ███████████████████████▋              34 GB
+    +4 GB  private       ██▊                                    4 GB
+```
+
+Select anything and press `d` to see when it grew and what produced it.
+
+### Watching it happen
+
+```bash
+disko watch                    # the current directory, every 3s
+disko watch ~/ --interval 30s
+```
+
+Growth since the moment you started watching, updated live — for when a build,
+a download or an agent is filling the disk right now and you want to see which
+directory is doing it.
+
+## What can I delete
+
+```console
+$ disko clean
+
+ Reclaimable developer storage                 73 GB
+
+  28 GB  Xcode DerivedData        safe to regenerate
+         regenerate: rebuild in Xcode · last used 2 days ago
+  19 GB  Gradle caches            safe to regenerate
+         regenerate: ./gradlew build · last used 6 hours ago · 3 locations
+  14 GB  Docker data              review first
+         regenerate: docker system prune · last used 3 weeks ago
+   7 GB  Android emulator images  review first
+         regenerate: recreate the AVD · unused for 4 months
+   5 GB  Rust target directories  safe to regenerate
+         regenerate: cargo build · last used 1 hour ago · 12 locations
+```
+
+Not "this folder is large" but **what produced it**, **whether removing it is
+safe**, **what would bring it back**, and **when anything last touched it** —
+that last one from real modification times gathered during the scan, not a
+guess.
+
+```bash
+disko clean --safe-only          # only things that regenerate themselves
+disko clean --idle-for 3mo       # only what nobody has touched in a season
+disko clean --delete             # after typing "delete" to confirm
+```
+
+Deletion is opt-in, prompts for a typed confirmation, and re-checks every path
+against the category rules immediately before removing it. A `target` directory
+only counts as build output when a `Cargo.toml` sits beside it.
+
+## Exploring
 
 ```bash
 disko              # pick a disk, then explore it
@@ -91,45 +157,52 @@ disko ~            # scan your home directory right away
 disko / --top 20   # the 20 largest things on the root filesystem
 ```
 
-Inside the TUI:
+The default screen answers three questions and nothing else — what is full,
+what is using the space, where to look next:
+
+```text
+ Macintosh HD                                      404 GB used of 494 GB
+ ████████████████████████████████████████░░░░░░░░  82%
+
+ Current folder: /    404 GB
+
+   257 GB  Users         ████████████████████▍             63.6%
+    84 GB  Library       ██████▋                           20.8%
+    34 GB  Applications  ██▊                                8.4%
+
+ Largest items
+   71 GB   ~/Library
+   48 GB   ~/Downloads
+   32 GB   ~/code
+```
+
+Press `Enter` for a DaisyDisk-style sunburst you can walk into.
 
 | Key | Does |
 | --- | --- |
 | `↑` `↓` | move the selection |
 | `Enter` | open the radial explorer (and drill in, once there) |
 | `→` `←` | open the selected folder / go back up |
+| **`t`** | **switch between size and growth** |
 | `/` | filter the list as you type |
 | `s` | cycle sort: size, name, item count |
-| `d` | filesystem details — device, type, inodes, read-only |
-| `a` | switch between space used on disk and apparent file sizes |
+| `d` | details — device, type, inodes, change, category |
+| `a` | apparent sizes instead of blocks used |
 | `Space` | mark an entry; the footer totals what you marked |
 | `r` | rescan |
 | `q` | quit |
 
-## Usage
-
 ### Disk capacity and directory usage never share a line
 
-The header always describes the **filesystem**:
-
-```
-Macintosh HD    404 GB used of 494 GB    82%
-```
-
-The body always describes the **directory you are in**:
-
-```
-Current folder: /Users/cesar    257 GB
-```
-
-Conflating those two numbers is the single most confusing thing a disk tool can
-do, so disko keeps them apart on purpose.
+The header always describes the **filesystem** (`Macintosh HD — 404 GB used of
+494 GB`). The body always describes the **directory you are in** (`Current
+folder: /Users/cesar — 257 GB`). Conflating those two numbers is the single
+most confusing thing a disk tool can do.
 
 ### Details are one key away, not in your face
 
-Filesystem types, device identifiers, inode counts, mount options and
-pseudo-filesystems are all real information — they are just not the answer to
-"what is filling my disk". They live behind `d` or a flag:
+Filesystem types, device identifiers, inode counts and pseudo-filesystems are
+real information — they are just not the answer to "what is filling my disk".
 
 ```bash
 disko --details        # device, type, read-only, inodes
@@ -137,48 +210,53 @@ disko --filesystems    # every mount, pseudo-filesystems included
 disko --inodes         # inode usage instead of bytes
 ```
 
-```
-Volume       Macintosh HD
-Mount        /
-Device       /dev/disk3s1s1
-Filesystem   apfs
-Read-only    no
-Capacity     404 GB used of 494 GB (82%)
-Inodes       1,452,254 used of 16,646,144 (9%)
-```
+## Scripting
 
-### Scripting
-
-Piping switches to text automatically — no flag needed — but they are there when
-you want to be explicit.
+Piping switches to text automatically — no flag needed.
 
 ```bash
-disko ~ --plain          # bytes, human size, share, path (tab separated)
-disko ~ --json           # the whole tree, structured
+disko ~ --plain            # bytes, human size, share, path (tab separated)
+disko ~ --json             # the whole tree, structured
+disko diff --plain         # signed bytes, human, kind, path
+disko clean --json         # categories, safety, regenerate command, last used
+disko watch --plain        # one line per interval, forever
 ```
+
+Raw bytes come first so `cut -f1` and `sort -n` work.
+
+### Network filesystems are skipped by default
+
+NFS, SMB, sshfs and blobfuse mounts are not on your disk, and stat-ing them one
+round trip at a time is brutal — a single directory listing on a blob-storage
+mount can take five seconds. disko stops at the mount point and says so rather
+than silently reporting a low number:
 
 ```console
-$ disko ~/code --plain --top 3
-8822644736	8.8 GB	81.1%	/home/cesar/code/stax
-1193025536	1.2 GB	11%	/home/cesar/code/disko
-847593472	848 MB	7.8%	/home/cesar/code/changed
-13811712	14 MB	0.1%	/home/cesar/code (other)
+$ disko /mnt --plain          # a blobfuse2 mount lives under here
+16384   16 KB   57.1%   /mnt/lost+found
+4096    4.1 KB  14.3%   /mnt/remote
+                                        # 0.009s, vs ~10 minutes walking Azure
 ```
 
-Raw bytes come first so `cut -f1` and `sort -n` work; the human column is there
-for when a person reads it too.
+Pass `--remote` to walk them anyway. Naming a network mount as the scan root
+still scans it — asking for it is asking for it.
+
+Note that `--depth` limits what is *kept*, not what is *walked*: sizes stay
+exact, so it does not make a slow mount fast.
 
 ### Options
 
 | Flag | Does |
 | --- | --- |
-| `-t, --top <N>` | show the N largest entries, grouping the rest as "Other" (default 20) |
+| `-t, --top <N>` | show the N largest entries, grouping the rest as "Other" |
 | `--depth <N>` | keep only N levels of tree; sizes stay exact either way |
 | `--apparent` | count file lengths (`ls`) instead of blocks used (`du`) |
 | `--binary` | GiB/MiB instead of GB/MB |
 | `-x, --one-file-system` | do not cross into other mounts |
-| `--count-hardlinks` | count a hard-linked file once per link instead of once per inode |
+| `--count-hardlinks` | count a hard-linked file once per link |
 | `-a, --all` | include pseudo-filesystems in the disk list |
+| `--remote` | walk network filesystems too (skipped by default) |
+| `--no-snapshot` | do not record this scan in the history |
 
 Sizes match `du` byte for byte: `--apparent` agrees with `du -sb`, and the
 default agrees with `du -s --block-size=1`.
@@ -186,21 +264,20 @@ default agrees with `du -s --block-size=1`.
 ## Library
 
 The engine is split out so the TUI, `--json` and anything you build sit on the
-same scanning implementation.
+same implementation.
 
 ```text
-disko-core      scanning · size aggregation · filesystem metadata
-                tree model · cancellation and progress
+disko-core      scanning · size aggregation · filesystem metadata · tree model
+                snapshots · diffing and growth attribution · category rules
 disko-render    radial layout · half-block canvas · braille canvas · bars
 disko-cli       commands · TUI · output modes
 ```
 
-`disko-core` returns neutral data and never formats anything for a particular
-display:
+`disko-core` returns neutral data and never formats anything for a display:
 
 ```rust
 use std::path::Path;
-use disko_core::{scan, ScanOptions, SizeKind};
+use disko_core::{scan, ScanOptions, SizeKind, Store};
 
 let tree = scan::scan(
     Path::new("/Users/cesar"),
@@ -209,9 +286,18 @@ let tree = scan::scan(
     &scan::Cancel::new(),
 )?;
 
-for child in &tree.children {
-    println!("{:>12}  {}", child.size(SizeKind::Allocated), child.name());
+// Compare against last time, then remember this time.
+let store = Store::open()?;
+if let Some(before) = store.latest(&tree.path) {
+    let diff = disko_core::diff::diff(
+        &before.tree, &tree, SizeKind::Allocated,
+        before.taken_at, disko_core::history::now(), before.floor,
+    );
+    for change in diff.growth(10) {
+        println!("{:>14}  {}", change.delta, change.path.display());
+    }
 }
+store.record(&tree)?;
 ```
 
 Scans run on rayon and can be driven from a UI thread:
@@ -233,9 +319,9 @@ make install    # debug build into ~/.cargo/bin
 make release    # bump, changelog, tag, publish (LEVEL=patch|minor|major)
 ```
 
-Every screen is rendered into an off-screen buffer and asserted at real terminal
-widths, so layout regressions — a column that overflows at 60 columns, a section
-that eats the list at 12 rows — fail the build rather than the user.
+Every screen is rendered into an off-screen buffer and asserted at real
+terminal widths, so layout regressions — a column that overflows at 60 columns,
+a section that eats the list at 12 rows — fail the build rather than the user.
 
 ## Platforms
 

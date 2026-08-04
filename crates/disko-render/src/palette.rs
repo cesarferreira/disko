@@ -49,6 +49,29 @@ pub fn shade(color: Rgb, factor: f32) -> Rgb {
     Rgb::new(blend(color.r), blend(color.g), blend(color.b))
 }
 
+/// Growth reads as warm and bright, shrinkage as cool and quiet, and
+/// everything that did not move fades into the background — so a glance at the
+/// chart separates "this is what happened" from "this was always here".
+pub const GROWTH: Rgb = Rgb::new(0, 200, 120);
+pub const SHRINK: Rgb = Rgb::new(70, 130, 200);
+pub const NEUTRAL: Rgb = Rgb::new(70, 70, 78);
+
+/// Colour a change by direction, with `scale` — the largest movement in view —
+/// setting how bright the biggest mover gets.
+pub fn growth_color(delta: i64, scale: i64) -> Rgb {
+    if delta == 0 || scale == 0 {
+        return NEUTRAL;
+    }
+
+    // Even the smallest reported mover stays clearly brighter than the
+    // unchanged background, or the quiet ones become invisible.
+    let intensity = (delta.abs() as f32 / scale.abs() as f32).clamp(0.0, 1.0);
+    let factor = 0.45 + 0.55 * intensity;
+
+    let base = if delta > 0 { GROWTH } else { SHRINK };
+    shade(base, factor)
+}
+
 pub const CAPACITY_OK: Rgb = Rgb::new(0, 158, 115);
 pub const CAPACITY_WARN: Rgb = Rgb::new(230, 159, 0);
 pub const CAPACITY_CRITICAL: Rgb = Rgb::new(213, 94, 0);
@@ -82,6 +105,24 @@ mod tests {
         let lighter = shade(base, 1.5);
         assert!(lighter.r > base.r && lighter.r < 255);
         assert_eq!(shade(base, 2.0), Rgb::new(255, 255, 255));
+    }
+
+    #[test]
+    fn growth_and_shrinkage_are_told_apart_at_a_glance() {
+        let grew = growth_color(100, 100);
+        let shrank = growth_color(-100, 100);
+        assert!(grew.g > grew.b, "growth should read green");
+        assert!(shrank.b > shrank.g, "shrinkage should read blue");
+        assert_eq!(growth_color(0, 100), NEUTRAL);
+        assert_eq!(growth_color(50, 0), NEUTRAL);
+    }
+
+    #[test]
+    fn small_movers_stay_visible_against_the_unchanged_background() {
+        let tiny = growth_color(1, 1_000_000);
+        assert!(tiny.g > NEUTRAL.g, "a small change must still stand out");
+        let big = growth_color(1_000_000, 1_000_000);
+        assert!(big.g > tiny.g, "bigger movers should be brighter");
     }
 
     #[test]

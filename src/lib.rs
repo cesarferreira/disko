@@ -5,6 +5,9 @@
 //! that decides what a person sees.
 
 pub mod cli;
+pub mod commands;
 pub mod model;
 pub mod output;
+pub mod report;
+pub mod timefmt;
 pub mod tui;

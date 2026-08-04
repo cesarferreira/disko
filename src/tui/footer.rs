@@ -21,13 +21,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let roomy = area.width >= 76;
     let keys = match (app.view, roomy) {
         (View::Overview, true) => {
-            "Enter explore   → open   ← up   / search   s sort   d details   q quit"
+            "Enter explore   → open   t growth   / search   s sort   d details   q quit"
         }
-        (View::Overview, false) => "Enter explore   / search   s sort   q quit",
+        (View::Overview, false) => "Enter explore   t growth   / search   q quit",
         (View::Explorer, true) => {
-            "↑↓ select   Enter open   Backspace up   Space mark   Esc overview   q quit"
+            "↑↓ select   Enter open   Backspace up   t growth   Space mark   Esc overview"
         }
-        (View::Explorer, false) => "↑↓ select   Enter open   Esc back   q quit",
+        (View::Explorer, false) => "↑↓ select   Enter open   t growth   Esc back",
         (View::Picker, _) => "↑↓ select   Enter scan   q quit",
         (View::Scanning, _) => "Esc stop scan   q quit",
     };
@@ -42,6 +42,15 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         )
     } else if let Some(status) = &app.status {
         status.clone()
+    } else if let Some(watch) = &app.watch {
+        // Watch mode's most useful status is how long it has been running.
+        format!(
+            "watching · every {}s · {}",
+            watch.every,
+            crate::timefmt::humanize(watch.elapsed())
+        )
+    } else if app.showing_growth() {
+        "showing growth".to_string()
     } else if app.view == View::Overview {
         format!("sorted by {}", app.sort.label())
     } else {
