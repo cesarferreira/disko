@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn allocated_size_counts_directory_inodes_like_du() {
+    fn allocated_size_adds_each_directory_to_what_is_underneath() {
         let tree = TempTree::new("allocated");
         tree.file("nested/b.txt", 2000);
 
@@ -378,10 +378,25 @@ mod tests {
         let nested = root.child("nested").unwrap();
         let file = nested.child("b.txt").unwrap();
 
-        // Root and nested each contribute their own blocks on top of the file.
-        assert!(root.allocated_size > nested.allocated_size);
-        assert!(nested.allocated_size > file.allocated_size);
+        // How much a directory inode itself occupies is filesystem-specific:
+        // ext4 charges a block, APFS reports none. Either way the totals
+        // accumulate upward and never lose what is below.
+        assert_eq!(
+            root.allocated_size,
+            own_blocks(&tree.0) + nested.allocated_size
+        );
+        assert_eq!(
+            nested.allocated_size,
+            own_blocks(&tree.0.join("nested")) + file.allocated_size
+        );
+        // A 2000-byte file always occupies whole blocks.
+        assert!(file.allocated_size >= 2000);
         assert_eq!(nested.apparent_size, 2000);
+    }
+
+    /// What the filesystem charges for one entry, ignoring its contents.
+    fn own_blocks(path: &Path) -> u64 {
+        allocated_of(&fs::symlink_metadata(path).unwrap())
     }
 
     #[test]
