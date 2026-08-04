@@ -285,6 +285,7 @@ fn handle_browsing(app: &mut App, key: KeyEvent) {
         KeyCode::Char('d') => app.details = !app.details,
         KeyCode::Char('a') => app.toggle_size_kind(),
         KeyCode::Char('t') => app.toggle_metric(),
+        KeyCode::Char('o') => app.reveal_selected(),
         KeyCode::Char(' ') => app.toggle_mark(),
         KeyCode::Char('x') | KeyCode::Delete => app.request_delete(),
         KeyCode::Char('r') => app.rescan(),

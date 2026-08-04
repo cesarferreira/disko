@@ -745,6 +745,29 @@ impl App {
         self.filesystems = disko_core::mounts::list(self.settings.show_all_filesystems);
     }
 
+    /// Show the selected entry in the desktop's file manager.
+    pub fn reveal_selected(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let Some(path) = row.path else {
+            self.status = Some("\"Other\" is a group, not a folder".into());
+            return;
+        };
+
+        match crate::reveal::reveal(&path, row.is_dir) {
+            Ok(()) => {
+                let shown = crate::reveal::folder_for(&path, row.is_dir).unwrap_or(path);
+                self.status = Some(format!(
+                    "opened {} in {}",
+                    model::display_path(&shown),
+                    crate::reveal::manager_name()
+                ));
+            }
+            Err(error) => self.status = Some(error),
+        }
+    }
+
     pub fn toggle_mark(&mut self) {
         let Some(path) = self.selected_row().and_then(|row| row.path) else {
             return;
