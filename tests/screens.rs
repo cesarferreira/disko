@@ -902,3 +902,118 @@ fn preview_delete_progress() {
     settle(&mut app);
     println!("--- done: {} ---", app.status.clone().unwrap());
 }
+
+// ---------------------------------------------------------------------------
+// Footer and revealing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shortcut_keys_are_coloured_apart_from_their_descriptions() {
+    let mut app = app();
+    let buffer = disko::tui::render(&mut app, 110, 30).unwrap();
+    let last = 29;
+
+    // Find the "q" of "q quit" and the "u" just after it in "quit".
+    let row: String = (0..110)
+        .map(|x| buffer.cell((x, last)).map(|c| c.symbol()).unwrap_or(" "))
+        .collect::<Vec<_>>()
+        .concat();
+    let quit_at = row.find("q quit").expect("the quit hint should be there");
+
+    let key_style = buffer.cell((quit_at as u16, last)).unwrap().style();
+    let label_style = buffer.cell((quit_at as u16 + 2, last)).unwrap().style();
+
+    assert_ne!(
+        key_style.fg, label_style.fg,
+        "the key and its description should not be the same colour"
+    );
+}
+
+#[test]
+fn the_footer_advertises_revealing_in_the_file_manager() {
+    let screen = joined(&render_lines(&mut app(), 130, 30).unwrap());
+    assert!(screen.contains("o reveal"), "{screen}");
+}
+
+#[test]
+fn the_way_out_survives_even_the_narrowest_terminal() {
+    for width in [24u16, 32, 40, 56, 80, 120, 200] {
+        for view in [View::Overview, View::Explorer, View::Picker] {
+            let mut app = app();
+            app.view = view;
+            let lines = render_lines(&mut app, width, 30).unwrap();
+            let footer = lines.last().unwrap();
+
+            let escape = match view {
+                View::Explorer => "Esc",
+                _ => "q",
+            };
+            assert!(
+                footer.contains(escape),
+                "{view:?} at {width} columns lost its way out: {footer:?}"
+            );
+            assert!(
+                footer.chars().count() <= width as usize,
+                "{view:?} at {width} overflowed: {footer:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn hints_are_dropped_from_the_least_important_end() {
+    let mut app = app();
+    let wide = render_lines(&mut app, 140, 30)
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    let narrow = render_lines(&mut app, 46, 30)
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+
+    // The most useful hint stays, the tail goes.
+    assert!(wide.contains("Enter explore"), "{wide}");
+    assert!(narrow.contains("Enter explore"), "{narrow}");
+    assert!(wide.contains("d details"), "{wide}");
+    assert!(!narrow.contains("d details"), "{narrow}");
+}
+
+#[test]
+fn revealing_the_other_row_explains_itself_rather_than_opening_nothing() {
+    let mut app = app();
+    // Force the synthetic "Other" row to be the selection.
+    app.settings.top = 1;
+    app.selection = 1;
+    assert!(app.selected_row().unwrap().is_other());
+
+    press(&mut app, KeyCode::Char('o'));
+
+    let status = app.status.clone().unwrap();
+    assert!(status.contains("group"), "{status}");
+}
+
+#[test]
+#[ignore = "visual check: cargo test -- --ignored --nocapture"]
+fn preview_footer() {
+    for width in [130u16, 100, 76, 56, 40] {
+        let mut app = app();
+        let footer = render_lines(&mut app, width, 30)
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        println!("{width:>4} |{footer}");
+    }
+    println!();
+    let mut app = app();
+    app.view = View::Explorer;
+    let footer = render_lines(&mut app, 100, 30)
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    println!("expl |{footer}");
+}

@@ -27,6 +27,14 @@ pub fn selected() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// Keyboard shortcuts in the footer. Bright enough to pick out of a dim row
+/// at a glance without competing with the data above it.
+pub fn key() -> Style {
+    Style::default()
+        .fg(Color::Rgb(122, 190, 245))
+        .add_modifier(Modifier::BOLD)
+}
+
 pub fn accent() -> Style {
     Style::default().fg(Color::Cyan)
 }

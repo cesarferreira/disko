@@ -10,5 +10,6 @@ pub mod deletion;
 pub mod model;
 pub mod output;
 pub mod report;
+pub mod reveal;
 pub mod timefmt;
 pub mod tui;

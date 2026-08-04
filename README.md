@@ -232,6 +232,7 @@ Press `Enter` for a DaisyDisk-style sunburst you can walk into.
 | `s` | cycle sort: size, name, item count |
 | `d` | details — device, type, inodes, change, category |
 | `a` | apparent sizes instead of blocks used |
+| `o` | show it in Finder / your file manager |
 | `Space` | mark an entry; the footer totals what you marked |
 | **`x`** | **delete what is marked** (or the selection), after confirmation |
 | `r` | rescan |
@@ -282,6 +283,17 @@ followed into. Totals correct themselves instantly, without a rescan.
 
 For caches specifically, `disko clean --delete` is usually the better tool: it
 knows what regenerates them.
+
+### Opening it where you can act on it
+
+`o` hands the selection to the desktop's file manager — Finder on macOS,
+Explorer on Windows, `xdg-open` elsewhere.
+
+disko only ever opens **folders**, never files. Selecting a file shows it inside
+its parent (`open -R` on macOS, `/select` on Windows, the containing folder on
+Linux). The files disko surfaces are by definition the enormous ones, and
+handing a 40 GB video to whatever application claims the extension is not a
+thing a disk tool should do by accident.
 
 ### Disk capacity and directory usage never share a line
 
