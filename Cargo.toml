@@ -3,7 +3,7 @@ members = [".", "crates/disko-core", "crates/disko-render"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -41,8 +41,8 @@ name = "disko"
 path = "src/main.rs"
 
 [dependencies]
-disko-core = { path = "crates/disko-core", version = "0.1.0" }
-disko-render = { path = "crates/disko-render", version = "0.1.0" }
+disko-core = { path = "crates/disko-core", version = "0.2.0" }
+disko-render = { path = "crates/disko-render", version = "0.2.0" }
 anyhow.workspace = true
 serde.workspace = true
 ratatui = "0.29"
