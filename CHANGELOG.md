@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-08-04
+
+### 🚀 Features
+
+- Open the selection in the file manager, and colour the shortcut keys
 ## [0.4.0] - 2026-08-04
 
 ### 🚀 Features
