@@ -5,6 +5,8 @@
 //! still carried, but they are details a caller opts into rather than the
 //! headline.
 
+// Only the Linux mount table needs a lookup map for volume labels.
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -127,8 +129,10 @@ pub fn for_path(path: &Path) -> Option<Filesystem> {
 
 /// Pretty names, device kind and removability, keyed by mount point.
 ///
-/// On macOS this is where "Macintosh HD" comes from; the kernel only knows it
-/// as `/dev/disk3s1s1`.
+/// Linux builds the mount list from `/proc/mounts`, which knows nothing about
+/// volume labels or whether a disk is removable, so sysinfo fills those in.
+/// Elsewhere sysinfo *is* the mount list and this is not needed.
+#[cfg(target_os = "linux")]
 fn disk_hints() -> HashMap<PathBuf, (String, String, bool)> {
     use sysinfo::{DiskKind, Disks};
 
