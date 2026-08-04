@@ -21,6 +21,15 @@
     &nbsp;·&nbsp;
     <a href="#library">Library</a>
   </p>
+
+  <p>
+    <img
+      src="https://raw.githubusercontent.com/cesarferreira/disko/main/assets/screenshot.png"
+      alt="disko's radial explorer showing a 427 GB home directory, with a legend naming every wedge"
+      width="900">
+  </p>
+
+  <p><em>The radial explorer. Every wedge is a directory, sized by what it holds.</em></p>
 </div>
 
 ---

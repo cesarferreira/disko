@@ -28,6 +28,9 @@ repository.workspace = true
 readme = "README.md"
 keywords = ["disk", "tui", "du", "df", "storage"]
 categories = ["command-line-utilities", "filesystem", "visualization"]
+# The README points at the screenshot by its raw.githubusercontent URL, so the
+# image renders on crates.io without shipping a megabyte of PNG in the crate.
+exclude = ["assets/"]
 
 [lib]
 name = "disko"
