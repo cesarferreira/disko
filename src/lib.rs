@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod commands;
+pub mod deletion;
 pub mod model;
 pub mod output;
 pub mod report;

@@ -189,8 +189,36 @@ Press `Enter` for a DaisyDisk-style sunburst you can walk into.
 | `d` | details — device, type, inodes, change, category |
 | `a` | apparent sizes instead of blocks used |
 | `Space` | mark an entry; the footer totals what you marked |
+| **`x`** | **delete what is marked** (or the selection), after confirmation |
 | `r` | rescan |
 | `q` | quit |
+
+### Deleting
+
+Mark things with `Space`, press **`x`**, and disko shows exactly what will go:
+
+```text
+ ┌ This cannot be undone ───────────────────────────────────────────┐
+ │Permanently delete 2 items, 16 GB                                 │
+ │                                                                  │
+ │  • ~/Library/Developer/Xcode/DerivedData/    12 GB                │
+ │  • ~/.gradle/caches/                          4 GB                │
+ │                                                                  │
+ │ Type delete to confirm: del▏  Esc to cancel                      │
+ └──────────────────────────────────────────────────────────────────┘
+```
+
+Nothing happens until the word is typed in full — `Enter` on its own is not
+enough, and navigation keys cannot reach the list behind the prompt. Every path
+is re-checked against the filesystem immediately before removal, so disko will
+refuse the scan root, anything outside the current scan, a mount point, or
+something that has vanished since the scan. Symlinks are unlinked, never
+followed into. Totals correct themselves instantly, without a rescan.
+
+`disko --read-only` removes the ability entirely.
+
+For caches specifically, `disko clean --delete` is usually the better tool: it
+knows what regenerates them.
 
 ### Disk capacity and directory usage never share a line
 
@@ -256,6 +284,7 @@ exact, so it does not make a slow mount fast.
 | `--count-hardlinks` | count a hard-linked file once per link |
 | `-a, --all` | include pseudo-filesystems in the disk list |
 | `--remote` | walk network filesystems too (skipped by default) |
+| `--read-only` | disable deleting entirely |
 | `--no-snapshot` | do not record this scan in the history |
 
 Sizes match `du` byte for byte: `--apparent` agrees with `du -sb`, and the

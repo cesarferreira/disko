@@ -125,6 +125,41 @@ impl DiskEntry {
         Some(node)
     }
 
+    /// Remove `path` from this tree, subtracting its totals from every
+    /// ancestor on the way back up.
+    ///
+    /// Lets the display correct itself the instant something is deleted,
+    /// without paying for a full rescan of a tree that may have taken minutes
+    /// to build.
+    pub fn remove(&mut self, path: &Path) -> Option<DiskEntry> {
+        // A tree cannot remove itself, and nothing outside it is its business.
+        if path == self.path || !path.starts_with(&self.path) {
+            return None;
+        }
+
+        if let Some(index) = self.children.iter().position(|child| child.path == path) {
+            let removed = self.children.remove(index);
+            self.subtract(&removed);
+            return Some(removed);
+        }
+
+        for child in &mut self.children {
+            if path.starts_with(&child.path)
+                && let Some(removed) = child.remove(path)
+            {
+                self.subtract(&removed);
+                return Some(removed);
+            }
+        }
+        None
+    }
+
+    fn subtract(&mut self, child: &DiskEntry) {
+        self.apparent_size = self.apparent_size.saturating_sub(child.apparent_size);
+        self.allocated_size = self.allocated_size.saturating_sub(child.allocated_size);
+        self.items = self.items.saturating_sub(child.items);
+    }
+
     /// Sorts every level largest-first. The TUI re-sorts by other keys itself;
     /// this is the ordering `--json` and `--plain` ship with.
     pub fn sort_by_size(&mut self, kind: SizeKind) {
@@ -227,6 +262,41 @@ mod tests {
         let largest = root.largest_at_depth(3, 5, SizeKind::Allocated);
         assert_eq!(largest.len(), 1);
         assert_eq!(largest[0].name(), "a");
+    }
+
+    #[test]
+    fn removing_an_entry_corrects_every_ancestor() {
+        let mut root = tree();
+        let before = root.allocated_size;
+
+        let removed = root.remove(Path::new("/root/a/deep")).unwrap();
+
+        assert_eq!(removed.allocated_size, 65);
+        assert_eq!(root.allocated_size, before - 65);
+        assert_eq!(root.child("a").unwrap().allocated_size, 70 - 65);
+        assert!(root.resolve(Path::new("/root/a/deep")).is_none());
+    }
+
+    #[test]
+    fn removing_a_whole_branch_takes_its_children_with_it() {
+        let mut root = tree();
+        let removed = root.remove(Path::new("/root/a")).unwrap();
+
+        assert_eq!(removed.children.len(), 1);
+        assert_eq!(root.allocated_size, 100 - 70);
+        assert!(root.child("a").is_none());
+    }
+
+    #[test]
+    fn a_tree_refuses_to_remove_itself_or_a_stranger() {
+        let mut root = tree();
+        assert!(root.remove(Path::new("/root")).is_none());
+        assert!(root.remove(Path::new("/elsewhere")).is_none());
+        assert!(root.remove(Path::new("/root/missing")).is_none());
+        assert_eq!(
+            root.allocated_size, 100,
+            "nothing should have been subtracted"
+        );
     }
 
     #[test]

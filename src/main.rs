@@ -85,7 +85,9 @@ fn settings(options: &Options) -> Settings {
 }
 
 fn run_tui(cli: &Cli) -> Result<()> {
-    let app = App::new(settings(&cli.options), cli.options.details);
+    let mut app = App::new(settings(&cli.options), cli.options.details);
+    app.read_only = cli.options.read_only;
+    let app = app;
     let app = match &cli.path {
         Some(path) => {
             ensure_readable(path)?;
