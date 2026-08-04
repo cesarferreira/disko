@@ -53,9 +53,11 @@ demo: install
 	@echo "=== disko demo ==="
 	disko --help
 
-# Bump version, regenerate CHANGELOG.md, tag, publish, and push (requires cargo-release)
+# Bump version, regenerate CHANGELOG.md, tag, publish workspace crates, and push
+# (requires cargo-release). `--workspace` publishes disko-core and disko-render
+# before disko-cli, whose published manifest depends on both.
 release: ensure-git-cliff
-	cargo release $(LEVEL) --execute --no-confirm
+	cargo release $(LEVEL) --workspace --execute --no-confirm
 
 # Ensure git-cliff (changelog generator, used by cargo-release's pre-release hook)
 # is available via cargo, so releasing does not depend on an OS-level install.
