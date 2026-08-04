@@ -1,0 +1,15 @@
+[package]
+name = "disko-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Radial layout, bar and braille renderers for disko"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+# The workspace root owns the vX.Y.Z tag; this crate rides the same version.
+[package.metadata.release]
+tag = false

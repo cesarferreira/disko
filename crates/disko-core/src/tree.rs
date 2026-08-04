@@ -1,0 +1,232 @@
+//! The neutral data the scanner produces. No formatting, no colours — the TUI,
+//! `--json` and any other consumer all read this same shape.
+
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::size::SizeKind;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryType {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
+
+/// How much of the truth an entry's sizes represent.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScanState {
+    /// Fully walked.
+    Complete,
+    /// Walked, but something underneath was denied, cancelled or depth-capped.
+    Partial,
+    /// `read_dir` failed — almost always a permission error.
+    Denied,
+    /// The user stopped the scan before this subtree finished.
+    Cancelled,
+    /// Deliberately not descended into (other filesystem, depth limit).
+    Skipped,
+}
+
+impl ScanState {
+    /// Worst-of, so a single denied leaf marks its ancestors partial.
+    fn merge(self, child: ScanState) -> ScanState {
+        match (self, child) {
+            (ScanState::Complete, ScanState::Complete) => ScanState::Complete,
+            (ScanState::Cancelled, _) | (_, ScanState::Cancelled) => ScanState::Cancelled,
+            (ScanState::Denied, _) => ScanState::Denied,
+            _ => ScanState::Partial,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiskEntry {
+    pub path: PathBuf,
+    /// Sum of file lengths, as `ls` reports.
+    pub apparent_size: u64,
+    /// Blocks actually occupied, as `du` reports.
+    pub allocated_size: u64,
+    pub entry_type: EntryType,
+    /// Number of filesystem entries in this subtree, including this one.
+    pub items: u64,
+    pub children: Vec<DiskEntry>,
+    pub scan_state: ScanState,
+}
+
+impl DiskEntry {
+    pub fn new(path: PathBuf, entry_type: EntryType) -> Self {
+        Self {
+            path,
+            apparent_size: 0,
+            allocated_size: 0,
+            entry_type,
+            items: 1,
+            children: Vec::new(),
+            scan_state: ScanState::Complete,
+        }
+    }
+
+    /// The last path component, falling back to the whole path for roots like
+    /// `/` which have no file name.
+    pub fn name(&self) -> Cow<'_, str> {
+        match self.path.file_name() {
+            Some(name) => name.to_string_lossy(),
+            None => self.path.to_string_lossy(),
+        }
+    }
+
+    pub fn size(&self, kind: SizeKind) -> u64 {
+        match kind {
+            SizeKind::Allocated => self.allocated_size,
+            SizeKind::Apparent => self.apparent_size,
+        }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.entry_type == EntryType::Directory
+    }
+
+    /// Roll a finished child's totals into this entry.
+    pub fn absorb(&mut self, child: &DiskEntry) {
+        self.apparent_size += child.apparent_size;
+        self.allocated_size += child.allocated_size;
+        self.items += child.items;
+        self.scan_state = self.scan_state.merge(child.scan_state);
+    }
+
+    pub fn child(&self, name: &str) -> Option<&DiskEntry> {
+        self.children.iter().find(|c| c.name() == name)
+    }
+
+    /// Walk down to `path`, which must live under this entry. Returns `None`
+    /// if any component is missing (a file that was deleted mid-session, or a
+    /// subtree the depth limit pruned).
+    pub fn resolve(&self, path: &Path) -> Option<&DiskEntry> {
+        let relative = path.strip_prefix(&self.path).ok()?;
+        let mut node = self;
+        for component in relative.components() {
+            let name = component.as_os_str().to_string_lossy();
+            node = node.child(&name)?;
+        }
+        Some(node)
+    }
+
+    /// Sorts every level largest-first. The TUI re-sorts by other keys itself;
+    /// this is the ordering `--json` and `--plain` ship with.
+    pub fn sort_by_size(&mut self, kind: SizeKind) {
+        self.children.sort_by(|a, b| {
+            b.size(kind)
+                .cmp(&a.size(kind))
+                .then_with(|| a.name().cmp(&b.name()))
+        });
+        for child in &mut self.children {
+            child.sort_by_size(kind);
+        }
+    }
+
+    /// Every descendant exactly `depth` levels below this entry.
+    ///
+    /// Used for the "Largest items" list: children answer *what* is big, but
+    /// grandchildren answer *where to look next* — `~/Downloads` is actionable
+    /// in a way that `Users` is not.
+    pub fn descendants_at_depth(&self, depth: usize) -> Vec<&DiskEntry> {
+        let mut out = Vec::new();
+        self.collect_at_depth(depth, &mut out);
+        out
+    }
+
+    fn collect_at_depth<'a>(&'a self, depth: usize, out: &mut Vec<&'a DiskEntry>) {
+        if depth == 0 {
+            out.push(self);
+            return;
+        }
+        for child in &self.children {
+            child.collect_at_depth(depth - 1, out);
+        }
+    }
+
+    /// The `n` biggest entries `depth` levels down, largest first. Falls back
+    /// to shallower levels when the tree is not that deep.
+    pub fn largest_at_depth(&self, depth: usize, n: usize, kind: SizeKind) -> Vec<&DiskEntry> {
+        let mut candidates = self.descendants_at_depth(depth);
+        for shallower in (1..depth).rev() {
+            if !candidates.is_empty() {
+                break;
+            }
+            candidates = self.descendants_at_depth(shallower);
+        }
+        candidates.sort_by_key(|entry| std::cmp::Reverse(entry.size(kind)));
+        candidates.truncate(n);
+        candidates
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(path: &str, size: u64, children: Vec<DiskEntry>) -> DiskEntry {
+        let mut entry = DiskEntry::new(PathBuf::from(path), EntryType::Directory);
+        entry.allocated_size = size;
+        entry.apparent_size = size;
+        entry.children = children;
+        entry
+    }
+
+    fn tree() -> DiskEntry {
+        dir(
+            "/root",
+            100,
+            vec![
+                dir("/root/a", 70, vec![dir("/root/a/deep", 65, vec![])]),
+                dir("/root/b", 30, vec![dir("/root/b/deep", 10, vec![])]),
+            ],
+        )
+    }
+
+    #[test]
+    fn resolves_nested_paths() {
+        let root = tree();
+        assert_eq!(
+            root.resolve(Path::new("/root/a/deep")).unwrap().name(),
+            "deep"
+        );
+        assert_eq!(root.resolve(Path::new("/root")).unwrap().name(), "root");
+        assert!(root.resolve(Path::new("/root/missing")).is_none());
+        assert!(root.resolve(Path::new("/elsewhere")).is_none());
+    }
+
+    #[test]
+    fn largest_at_depth_looks_past_direct_children() {
+        let root = tree();
+        let largest = root.largest_at_depth(2, 2, SizeKind::Allocated);
+        let names: Vec<_> = largest
+            .iter()
+            .map(|e| e.path.display().to_string())
+            .collect();
+        assert_eq!(names, vec!["/root/a/deep", "/root/b/deep"]);
+    }
+
+    #[test]
+    fn largest_at_depth_falls_back_when_tree_is_shallow() {
+        let root = dir("/root", 10, vec![dir("/root/a", 5, vec![])]);
+        let largest = root.largest_at_depth(3, 5, SizeKind::Allocated);
+        assert_eq!(largest.len(), 1);
+        assert_eq!(largest[0].name(), "a");
+    }
+
+    #[test]
+    fn scan_state_degrades_to_partial() {
+        let mut parent = DiskEntry::new(PathBuf::from("/p"), EntryType::Directory);
+        let mut denied = DiskEntry::new(PathBuf::from("/p/c"), EntryType::Directory);
+        denied.scan_state = ScanState::Denied;
+        parent.absorb(&denied);
+        assert_eq!(parent.scan_state, ScanState::Partial);
+    }
+}

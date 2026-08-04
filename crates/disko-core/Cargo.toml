@@ -1,0 +1,22 @@
+[package]
+name = "disko-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Scanning, size aggregation and filesystem metadata engine behind disko"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rayon = "1.12.0"
+serde.workspace = true
+sysinfo = { version = "0.36.1", default-features = false, features = ["disk"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"
+
+# The workspace root owns the vX.Y.Z tag; this crate rides the same version.
+[package.metadata.release]
+tag = false

@@ -1,0 +1,14 @@
+sign-commit = false
+sign-tag = false
+publish = true
+push = true
+
+# The engine crates and the CLI move together; one version, one tag. The
+# sub-crates set `tag = false` in their own Cargo.toml so only the root
+# package stamps `vX.Y.Z`.
+shared-version = true
+tag-name = "v{{version}}"
+
+# Regenerate CHANGELOG.md with git-cliff inside cargo-release's release commit.
+# --tag treats the not-yet-tagged commits as belonging to the version being released.
+pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "v{{version}}"]
