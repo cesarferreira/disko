@@ -703,3 +703,95 @@ fn preview_delete_prompt() {
         println!("|{line}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Opening instantly
+// ---------------------------------------------------------------------------
+
+#[test]
+fn last_known_numbers_are_labelled_as_last_known() {
+    let mut app = app();
+    // Two hours ago, while a fresh scan is on its way.
+    app.provisional = Some(disko_core::history::now() - 7200);
+
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+
+    assert!(screen.contains("as of 2 hours ago"), "{screen}");
+    assert!(screen.contains("rescanning"), "{screen}");
+    // The numbers themselves are still shown — they are real, just old.
+    assert!(screen.contains("257 GB"), "{screen}");
+}
+
+#[test]
+fn the_explorer_says_so_too() {
+    let mut app = app();
+    app.provisional = Some(disko_core::history::now() - 90);
+    app.view = View::Explorer;
+
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(screen.contains("rescanning"), "{screen}");
+}
+
+#[test]
+fn the_label_disappears_once_the_real_scan_lands() {
+    let mut app = app();
+    app.provisional = Some(disko_core::history::now() - 7200);
+    assert!(joined(&render_lines(&mut app, 100, 30).unwrap()).contains("rescanning"));
+
+    app.provisional = None;
+
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(!screen.contains("rescanning"), "{screen}");
+    assert!(!screen.contains("as of"), "{screen}");
+}
+
+#[test]
+fn a_running_scan_shows_what_it_has_already_counted() {
+    let mut app = app();
+    app.view = View::Scanning;
+    app.root = PathBuf::from("/");
+    app.streamed = vec![
+        disko_core::scan::Finished {
+            path: PathBuf::from("/Users/cesar/Library"),
+            allocated: 71 * GB,
+            apparent: 71 * GB,
+            items: 900,
+        },
+        disko_core::scan::Finished {
+            path: PathBuf::from("/Users/cesar/Downloads"),
+            allocated: 48 * GB,
+            apparent: 48 * GB,
+            items: 120,
+        },
+    ];
+
+    let screen = joined(&render_lines(&mut app, 100, 24).unwrap());
+
+    assert!(screen.contains("Biggest so far"), "{screen}");
+    assert!(screen.contains("71 GB"), "{screen}");
+    assert!(screen.contains("Library"), "{screen}");
+    assert!(screen.contains("Scanning"), "{screen}");
+}
+
+#[test]
+fn the_progress_screen_survives_a_short_terminal() {
+    let mut app = app();
+    app.view = View::Scanning;
+    app.streamed = (0..12)
+        .map(|index| disko_core::scan::Finished {
+            path: PathBuf::from(format!("/some/deep/path/number-{index}")),
+            allocated: (12 - index) * GB,
+            apparent: 0,
+            items: 1,
+        })
+        .collect();
+
+    for (width, height) in [(40u16, 10u16), (60, 14), (100, 24), (140, 40)] {
+        for line in render_lines(&mut app, width, height).unwrap() {
+            assert!(
+                line.chars().count() <= width as usize,
+                "scanning at {width}x{height} overflowed: {line}"
+            );
+        }
+    }
+}

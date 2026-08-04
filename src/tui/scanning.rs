@@ -15,7 +15,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &App, tick: usize) {
     let chunks = Layout::vertical([
-        Constraint::Min(0),
+        Constraint::Length(2),
         Constraint::Length(4),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -68,5 +68,50 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, tick: usize) {
         Paragraph::new(lines).alignment(Alignment::Center),
         chunks[1],
     );
+    draw_found(frame, chunks[2], app);
     crate::tui::footer::draw(frame, chunks[3], app);
+}
+
+/// The biggest things counted so far.
+///
+/// These are finished directories, not running estimates: each number is final
+/// for that folder. The list is incomplete, never wrong.
+fn draw_found(frame: &mut Frame, area: Rect, app: &App) {
+    if app.streamed.is_empty() || area.height < 3 {
+        return;
+    }
+
+    let unit = app.settings.unit;
+    let rows = (area.height as usize)
+        .saturating_sub(2)
+        .min(app.streamed.len());
+    let size_width = app
+        .streamed
+        .iter()
+        .take(rows)
+        .map(|done| format(done.allocated, unit).chars().count())
+        .max()
+        .unwrap_or(8);
+    let path_width = (area.width as usize).saturating_sub(size_width + 6);
+
+    let mut lines = vec![
+        Line::default(),
+        Line::from(Span::styled("  Biggest so far", theme::muted())),
+    ];
+    lines.extend(app.streamed.iter().take(rows).map(|done| {
+        Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                format!("{:>size_width$}", format(done.allocated, unit)),
+                theme::heading(),
+            ),
+            Span::raw("   "),
+            Span::styled(
+                shorten_path(&model::display_path(&done.path), path_width),
+                theme::secondary(),
+            ),
+        ])
+    }));
+
+    frame.render_widget(Paragraph::new(lines), area);
 }

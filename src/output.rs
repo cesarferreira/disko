@@ -337,14 +337,14 @@ mod tests {
             ("MOUNTED ON", Align::Left),
         ]);
         table.push(vec!["Root".into(), "132 GB".into(), "/".into()]);
-        table.push(vec!["workspace".into(), "1 GB".into(), "/workspace".into()]);
+        table.push(vec!["backup".into(), "1 GB".into(), "/mnt/backup".into()]);
         let text = rendered(|out| table.write(out));
 
         // Sizes right-align, and so does their header.
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "NAME         SIZE  MOUNTED ON");
-        assert_eq!(lines[1], "Root       132 GB  /");
-        assert_eq!(lines[2], "workspace    1 GB  /workspace");
+        assert_eq!(lines[0], "NAME      SIZE  MOUNTED ON");
+        assert_eq!(lines[1], "Root    132 GB  /");
+        assert_eq!(lines[2], "backup    1 GB  /mnt/backup");
     }
 
     #[test]

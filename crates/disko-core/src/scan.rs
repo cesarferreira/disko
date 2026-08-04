@@ -41,6 +41,20 @@ impl Default for ScanOptions {
     }
 }
 
+/// A directory that has finished being counted, published while the rest of
+/// the scan is still running.
+///
+/// Every figure here is final for that directory — a summary is only sent once
+/// its whole subtree is counted. A UI showing these is showing incomplete
+/// information, never wrong information.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Finished {
+    pub path: PathBuf,
+    pub allocated: u64,
+    pub apparent: u64,
+    pub items: u64,
+}
+
 /// Live counters a UI can poll while a scan runs on another thread.
 #[derive(Debug, Default)]
 pub struct Progress {
@@ -49,9 +63,44 @@ pub struct Progress {
     errors: AtomicU64,
     finished: AtomicBool,
     current: Mutex<PathBuf>,
+    /// Levels below the root that publish a summary as they complete. Zero
+    /// means the caller is not watching, and nothing is queued.
+    stream_depth: usize,
+    completed: Mutex<Vec<Finished>>,
 }
 
 impl Progress {
+    /// Publish directory summaries this many levels below the root as they
+    /// finish, so a UI can show real numbers before the scan ends.
+    pub fn streaming(stream_depth: usize) -> Self {
+        Self {
+            stream_depth,
+            ..Default::default()
+        }
+    }
+
+    /// Take everything published since the last call.
+    pub fn drain_completed(&self) -> Vec<Finished> {
+        match self.completed.lock() {
+            Ok(mut queue) => std::mem::take(&mut *queue),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn publish(&self, depth: usize, entry: &DiskEntry) {
+        if depth == 0 || depth > self.stream_depth {
+            return;
+        }
+        if let Ok(mut queue) = self.completed.lock() {
+            queue.push(Finished {
+                path: entry.path.clone(),
+                allocated: entry.allocated_size,
+                apparent: entry.apparent_size,
+                items: entry.items,
+            });
+        }
+    }
+
     pub fn entries(&self) -> u64 {
         self.entries.load(Ordering::Relaxed)
     }
@@ -191,7 +240,17 @@ pub fn scan_in_background(
     root: PathBuf,
     options: ScanOptions,
 ) -> (Arc<Progress>, Cancel, JoinHandle<Result<DiskEntry>>) {
-    let progress = Arc::new(Progress::default());
+    scan_in_background_streaming(root, options, 0)
+}
+
+/// As [`scan_in_background`], but publishing directory summaries up to
+/// `stream_depth` levels down while the scan runs.
+pub fn scan_in_background_streaming(
+    root: PathBuf,
+    options: ScanOptions,
+    stream_depth: usize,
+) -> (Arc<Progress>, Cancel, JoinHandle<Result<DiskEntry>>) {
+    let progress = Arc::new(Progress::streaming(stream_depth));
     let cancel = Cancel::new();
 
     let handle = {
@@ -273,6 +332,7 @@ fn scan_dir(path: &Path, meta: &Metadata, depth: usize, ctx: &Ctx) -> DiskEntry 
         entry.children = children;
     }
 
+    ctx.progress.publish(depth, &entry);
     entry
 }
 
@@ -483,6 +543,63 @@ mod tests {
 
         assert_eq!(root.scan_state, ScanState::Cancelled);
         assert!(root.children.is_empty());
+    }
+
+    #[test]
+    fn completed_directories_are_published_while_the_scan_runs() {
+        let tree = TempTree::new("stream");
+        tree.file("alpha/one.txt", 1000);
+        tree.file("beta/two.txt", 2000);
+        tree.file("beta/deeper/three.txt", 3000);
+
+        let progress = Progress::streaming(2);
+        let root = scan(&tree.0, &ScanOptions::default(), &progress, &Cancel::new()).unwrap();
+
+        let published = progress.drain_completed();
+        let names: Vec<String> = published
+            .iter()
+            .map(|done| done.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        // Two levels down, and never the root itself.
+        assert!(names.contains(&"alpha".to_string()), "{names:?}");
+        assert!(names.contains(&"beta".to_string()), "{names:?}");
+        assert!(names.contains(&"deeper".to_string()), "{names:?}");
+        assert!(!names.contains(&root.name().to_string()), "{names:?}");
+
+        // Every published figure is final, not a running partial.
+        let beta = published
+            .iter()
+            .find(|done| done.path.ends_with("beta"))
+            .unwrap();
+        assert_eq!(beta.apparent, 5000);
+
+        // Draining twice does not repeat anything.
+        assert!(progress.drain_completed().is_empty());
+    }
+
+    #[test]
+    fn nothing_is_published_when_nobody_is_watching() {
+        let tree = TempTree::new("nostream");
+        tree.file("alpha/one.txt", 1000);
+
+        let progress = Progress::default();
+        scan(&tree.0, &ScanOptions::default(), &progress, &Cancel::new()).unwrap();
+
+        assert!(progress.drain_completed().is_empty());
+    }
+
+    #[test]
+    fn streaming_stops_at_the_requested_depth() {
+        let tree = TempTree::new("streamdepth");
+        tree.file("a/b/c/deep.txt", 100);
+
+        let progress = Progress::streaming(1);
+        scan(&tree.0, &ScanOptions::default(), &progress, &Cancel::new()).unwrap();
+
+        let published = progress.drain_completed();
+        assert_eq!(published.len(), 1);
+        assert!(published[0].path.ends_with("a"));
     }
 
     #[test]
