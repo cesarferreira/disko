@@ -220,7 +220,7 @@ fn remove(
                 )?;
                 continue;
             }
-            match std::fs::remove_dir_all(path) {
+            match crate::deletion::delete(path) {
                 Ok(()) => {
                     freed += group.size / group.paths.len().max(1) as u64;
                     writeln!(out, " removed {}", display_path(path))?;

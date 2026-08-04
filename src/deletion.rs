@@ -6,8 +6,11 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
-use disko_core::DiskEntry;
+use disko_core::scan::Cancel;
 
 /// Something the user has asked to remove.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +35,8 @@ pub enum Refusal {
     Missing,
     /// A path with no parent — `/` and friends.
     Filesystem,
+    /// The user stopped the deletion before reaching this one.
+    Stopped,
 }
 
 impl fmt::Display for Refusal {
@@ -42,6 +47,7 @@ impl fmt::Display for Refusal {
             Refusal::MountPoint => "this is a mount point",
             Refusal::Missing => "no longer exists",
             Refusal::Filesystem => "this is a filesystem root",
+            Refusal::Stopped => "stopped before reaching it",
         };
         f.write_str(reason)
     }
@@ -69,14 +75,130 @@ pub fn check(path: &Path, root: &Path) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Live counters for a deletion running on another thread.
+///
+/// Removing 68 GB of build caches takes long enough that a UI without these
+/// looks like it has hung.
+#[derive(Debug, Default)]
+pub struct DeleteProgress {
+    items_done: AtomicUsize,
+    items_total: AtomicUsize,
+    files_removed: AtomicU64,
+    freed: AtomicU64,
+    finished: AtomicBool,
+    current: Mutex<PathBuf>,
+}
+
+impl DeleteProgress {
+    pub fn new(total: usize) -> Self {
+        let progress = Self::default();
+        progress.items_total.store(total, Ordering::Relaxed);
+        progress
+    }
+
+    /// Which of the requested items is being worked on, 1-based.
+    pub fn items_done(&self) -> usize {
+        self.items_done.load(Ordering::Relaxed)
+    }
+
+    pub fn items_total(&self) -> usize {
+        self.items_total.load(Ordering::Relaxed)
+    }
+
+    /// Individual files and directories unlinked so far. The number that moves
+    /// while one enormous directory is being cleared.
+    pub fn files_removed(&self) -> u64 {
+        self.files_removed.load(Ordering::Relaxed)
+    }
+
+    pub fn freed(&self) -> u64 {
+        self.freed.load(Ordering::Relaxed)
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Relaxed)
+    }
+
+    pub fn current(&self) -> PathBuf {
+        self.current
+            .lock()
+            .map(|path| path.clone())
+            .unwrap_or_default()
+    }
+
+    fn start_item(&self, path: &Path) {
+        if let Ok(mut current) = self.current.lock() {
+            current.clear();
+            current.push(path);
+        }
+    }
+
+    fn finish_item(&self) {
+        self.items_done.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bytes are credited as each file is unlinked rather than when a whole
+    /// item finishes: clearing one 9 GB directory would otherwise show
+    /// "freed 0 B" for the entire time it was working.
+    fn file_removed(&self, bytes: u64) {
+        self.files_removed.fetch_add(1, Ordering::Relaxed);
+        self.freed.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn finish(&self) {
+        self.finished.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Remove a checked path. Symlinks are unlinked, never followed.
 pub fn delete(path: &Path) -> std::io::Result<()> {
+    delete_watched(path, &DeleteProgress::default(), &Cancel::new())
+}
+
+/// Remove a path, counting entries as they go and stopping if asked.
+///
+/// This walks and unlinks by hand rather than calling `remove_dir_all`, which
+/// is a single opaque call: on a directory with a hundred thousand files that
+/// is the difference between a progress counter and a frozen screen.
+fn delete_watched(path: &Path, progress: &DeleteProgress, cancel: &Cancel) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
+
+    // A symlink is unlinked as itself; following one would delete whatever it
+    // happens to point at.
     if meta.file_type().is_symlink() || !meta.is_dir() {
-        std::fs::remove_file(path)
-    } else {
-        std::fs::remove_dir_all(path)
+        let bytes = allocated_of(&meta);
+        std::fs::remove_file(path)?;
+        progress.file_removed(bytes);
+        return Ok(());
     }
+    let own_bytes = allocated_of(&meta);
+
+    for entry in std::fs::read_dir(path)? {
+        if cancel.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "stopped",
+            ));
+        }
+        delete_watched(&entry?.path(), progress, cancel)?;
+    }
+
+    std::fs::remove_dir(path)?;
+    progress.file_removed(own_bytes);
+    Ok(())
+}
+
+/// What the entry actually occupies, matching how disko counts sizes
+/// everywhere else.
+#[cfg(unix)]
+fn allocated_of(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.blocks() * 512
+}
+
+#[cfg(not(unix))]
+fn allocated_of(meta: &std::fs::Metadata) -> u64 {
+    meta.len()
 }
 
 /// A directory whose device differs from its parent's is a mount point.
@@ -110,36 +232,73 @@ pub enum Outcome {
     Failed { path: PathBuf, error: String },
 }
 
-/// Delete every target that passes its check, correcting `tree` as it goes so
-/// the display matches reality without a rescan.
-pub fn delete_all(targets: &[Target], root: &Path, tree: &mut DiskEntry) -> Vec<Outcome> {
-    targets
-        .iter()
-        .map(|target| match check(&target.path, root) {
+/// Delete every target that passes its check.
+///
+/// Each path is re-checked immediately before it is removed, not when the list
+/// was drawn.
+pub fn delete_all(
+    targets: &[Target],
+    root: &Path,
+    progress: &DeleteProgress,
+    cancel: &Cancel,
+) -> Vec<Outcome> {
+    let mut outcomes = Vec::with_capacity(targets.len());
+
+    for target in targets {
+        if cancel.is_cancelled() {
+            outcomes.push(Outcome::Refused {
+                path: target.path.clone(),
+                reason: Refusal::Stopped,
+            });
+            continue;
+        }
+
+        progress.start_item(&target.path);
+        let outcome = match check(&target.path, root) {
             Err(reason) => Outcome::Refused {
                 path: target.path.clone(),
                 reason,
             },
-            Ok(()) => match delete(&target.path) {
+            Ok(()) => match delete_watched(&target.path, progress, cancel) {
                 Ok(()) => {
-                    // Trust the tree's own figure over the caller's: it is what
-                    // the totals on screen were built from.
-                    let size = tree
-                        .remove(&target.path)
-                        .map(|removed| removed.allocated_size)
-                        .unwrap_or(target.size);
+                    progress.finish_item();
                     Outcome::Deleted {
                         path: target.path.clone(),
-                        size,
+                        size: target.size,
                     }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Outcome::Failed {
+                    path: target.path.clone(),
+                    error: "stopped part-way through".to_string(),
+                },
                 Err(error) => Outcome::Failed {
                     path: target.path.clone(),
                     error: error.to_string(),
                 },
             },
-        })
-        .collect()
+        };
+        outcomes.push(outcome);
+    }
+
+    progress.finish();
+    outcomes
+}
+
+/// Run a deletion on its own thread so the interface stays alive.
+pub fn delete_in_background(
+    targets: Vec<Target>,
+    root: PathBuf,
+) -> (Arc<DeleteProgress>, Cancel, JoinHandle<Vec<Outcome>>) {
+    let progress = Arc::new(DeleteProgress::new(targets.len()));
+    let cancel = Cancel::new();
+
+    let handle = {
+        let progress = Arc::clone(&progress);
+        let cancel = cancel.clone();
+        std::thread::spawn(move || delete_all(&targets, &root, &progress, &cancel))
+    };
+
+    (progress, cancel, handle)
 }
 
 /// Total actually freed.
@@ -156,7 +315,6 @@ pub fn freed(outcomes: &[Outcome]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use disko_core::EntryType;
     use std::fs;
 
     struct TempTree(PathBuf);
@@ -190,12 +348,13 @@ mod tests {
         }
     }
 
-    fn entry(path: &Path, size: u64, children: Vec<DiskEntry>) -> DiskEntry {
-        let mut entry = DiskEntry::new(path.to_path_buf(), EntryType::Directory);
-        entry.allocated_size = size;
-        entry.apparent_size = size;
-        entry.children = children;
-        entry
+    fn run(targets: &[Target], root: &Path) -> Vec<Outcome> {
+        delete_all(
+            targets,
+            root,
+            &DeleteProgress::new(targets.len()),
+            &Cancel::new(),
+        )
     }
 
     #[test]
@@ -260,13 +419,12 @@ mod tests {
     }
 
     #[test]
-    fn deleting_corrects_the_tree_and_reports_what_was_freed() {
+    fn deleting_reports_what_went_and_what_did_not() {
         let temp = TempTree::new("outcomes");
         let victim = temp.dir("victim");
         temp.file("victim/blob", 1000);
         let missing = temp.0.join("already-gone");
 
-        let mut tree = entry(&temp.0, 5000, vec![entry(&victim, 3000, vec![])]);
         let targets = vec![
             Target {
                 path: victim.clone(),
@@ -280,7 +438,7 @@ mod tests {
             },
         ];
 
-        let outcomes = delete_all(&targets, &temp.0, &mut tree);
+        let outcomes = run(&targets, &temp.0);
 
         assert!(matches!(outcomes[0], Outcome::Deleted { size: 3000, .. }));
         assert!(matches!(
@@ -291,9 +449,86 @@ mod tests {
             }
         ));
         assert_eq!(freed(&outcomes), 3000);
-        // The totals on screen correct themselves without a rescan.
-        assert_eq!(tree.allocated_size, 2000);
-        assert!(tree.children.is_empty());
+        assert!(!victim.exists());
+    }
+
+    #[test]
+    fn progress_moves_while_a_big_directory_is_being_cleared() {
+        let temp = TempTree::new("progress");
+        let victim = temp.dir("victim");
+        for index in 0..25 {
+            temp.file(&format!("victim/file-{index}"), 10);
+        }
+
+        let targets = vec![Target {
+            path: victim.clone(),
+            size: 250,
+            is_dir: true,
+        }];
+        let progress = DeleteProgress::new(1);
+        delete_all(&targets, &temp.0, &progress, &Cancel::new());
+
+        // 25 files plus the directory itself.
+        assert_eq!(progress.files_removed(), 26);
+        assert_eq!(progress.items_done(), 1);
+        // Bytes are credited per file as they go, so the counter moves during
+        // the work rather than jumping at the end.
+        assert!(progress.freed() > 0);
+        assert!(progress.is_finished());
+    }
+
+    #[test]
+    fn a_cancelled_deletion_stops_and_says_which_ones_it_never_reached() {
+        let temp = TempTree::new("cancelled");
+        let first = temp.dir("first");
+        let second = temp.dir("second");
+
+        let targets = vec![
+            Target {
+                path: first,
+                size: 10,
+                is_dir: true,
+            },
+            Target {
+                path: second.clone(),
+                size: 10,
+                is_dir: true,
+            },
+        ];
+
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let outcomes = delete_all(&targets, &temp.0, &DeleteProgress::new(2), &cancel);
+
+        assert!(outcomes.iter().all(|outcome| matches!(
+            outcome,
+            Outcome::Refused {
+                reason: Refusal::Stopped,
+                ..
+            }
+        )));
+        assert!(second.exists(), "a stopped deletion leaves the rest alone");
+        assert_eq!(freed(&outcomes), 0);
+    }
+
+    #[test]
+    fn a_background_deletion_can_be_joined_for_its_outcomes() {
+        let temp = TempTree::new("background");
+        let victim = temp.dir("victim");
+        temp.file("victim/blob", 500);
+
+        let (progress, _cancel, handle) = delete_in_background(
+            vec![Target {
+                path: victim.clone(),
+                size: 500,
+                is_dir: true,
+            }],
+            temp.0.clone(),
+        );
+        let outcomes = handle.join().unwrap();
+
+        assert!(progress.is_finished());
+        assert_eq!(freed(&outcomes), 500);
         assert!(!victim.exists());
     }
 
@@ -303,14 +538,13 @@ mod tests {
         let outsider = TempTree::new("refused-other");
         let precious = outsider.dir("precious");
 
-        let mut tree = entry(&temp.0, 100, vec![]);
         let targets = vec![Target {
             path: precious.clone(),
             size: 10,
             is_dir: true,
         }];
 
-        let outcomes = delete_all(&targets, &temp.0, &mut tree);
+        let outcomes = run(&targets, &temp.0);
 
         assert!(matches!(
             outcomes[0],

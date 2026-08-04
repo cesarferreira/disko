@@ -244,7 +244,26 @@ Mark things with `Space`, press **`x`**, and disko shows exactly what will go:
 ```
 
 Nothing happens until the word is typed in full — `Enter` on its own is not
-enough, and navigation keys cannot reach the list behind the prompt. Every path
+enough, and navigation keys cannot reach the list behind the prompt.
+
+The removal itself runs on a background thread with live counters, because
+clearing 68 GB of build caches means unlinking hundreds of thousands of files
+and a screen that stops redrawing for a minute is indistinguishable from a
+crash:
+
+```text
+ ┌ Deleting ────────────────────────────────────────────────────┐
+ │⠙ Deleting 3 of 12                                            │
+ │                                                              │
+ │ ~/.stax/worktrees/stax/ready-ci-oneline                      │
+ │                                                              │
+ │ freed 19 GB  ·  482310 files removed                         │
+ │ Esc to stop after the current item                           │
+ └──────────────────────────────────────────────────────────────┘
+```
+
+`Esc` stops it after the file it is on, and reports which items it never
+reached. Every path
 is re-checked against the filesystem immediately before removal, so disko will
 refuse the scan root, anything outside the current scan, a mount point, or
 something that has vanished since the scan. Symlinks are unlinked, never

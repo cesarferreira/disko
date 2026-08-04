@@ -73,7 +73,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
 
     loop {
         app.poll_scan();
+        app.poll_delete();
         app.tick_watch();
+        app.advance();
         terminal.draw(|frame| draw(frame, app, &mut ui, tick))?;
 
         if event::poll(FRAME)? {
@@ -105,6 +107,9 @@ fn draw(frame: &mut Frame, app: &mut App, ui: &mut Ui, tick: usize) {
     // The confirmation sits above everything, including the details panel.
     if let Some(pending) = app.confirm.clone() {
         confirm::draw(frame, area, app, &pending);
+    }
+    if let Some(deleting) = &app.deleting {
+        confirm::draw_progress(frame, area, app, deleting);
     }
 }
 
@@ -144,9 +149,29 @@ pub fn press(app: &mut App, code: KeyCode) {
     handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
 }
 
+/// Block until any background deletion has finished and been folded back in.
+///
+/// The event loop polls for this between frames; tests and scripted runs need
+/// somewhere to wait instead.
+pub fn settle(app: &mut App) {
+    while app.deleting.is_some() {
+        app.poll_delete();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn handle_key(app: &mut App, key: KeyEvent) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
         app.quit = true;
+        return;
+    }
+
+    // A deletion in flight takes only "stop"; nothing else should reach the
+    // tree while it is being changed underneath.
+    if app.deleting.is_some() {
+        if matches!(key.code, KeyCode::Esc) {
+            app.stop_delete();
+        }
         return;
     }
 

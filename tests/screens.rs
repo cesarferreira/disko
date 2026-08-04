@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use disko::model::Sort;
 use disko::tui::app::{App, Settings, View};
-use disko::tui::{press, render_lines};
+use disko::tui::{press, render_lines, settle};
 use disko_core::mounts::Filesystem;
 use disko_core::{DiskEntry, EntryType, ScanOptions, SizeKind, Unit};
 use ratatui::crossterm::event::KeyCode;
@@ -593,6 +593,7 @@ fn typing_the_word_and_pressing_enter_deletes_and_corrects_the_totals() {
     press(&mut app, KeyCode::Char('x'));
     type_word(&mut app, "delete");
     press(&mut app, KeyCode::Enter);
+    settle(&mut app);
 
     assert!(!sandbox.0.join("cache").exists(), "it should be gone");
     assert!(sandbox.0.join("keep/notes").exists(), "and nothing else");
@@ -622,6 +623,7 @@ fn marked_entries_are_deleted_together() {
 
     type_word(&mut app, "delete");
     press(&mut app, KeyCode::Enter);
+    settle(&mut app);
 
     assert!(!sandbox.0.join("cache").exists());
     assert!(!sandbox.0.join("keep").exists());
@@ -677,6 +679,7 @@ fn the_scan_root_itself_can_never_be_deleted() {
     });
 
     press(&mut app, KeyCode::Enter);
+    settle(&mut app);
 
     assert!(sandbox.0.exists(), "the scanned folder must survive");
     let status = app.status.clone().unwrap();
@@ -794,4 +797,108 @@ fn the_progress_screen_survives_a_short_terminal() {
             );
         }
     }
+}
+
+/// The reported bug: deleting 68 GB blocked the draw loop, so the whole
+/// interface appeared to hang with no output and no way to interrupt it.
+#[test]
+fn a_running_deletion_keeps_the_interface_alive() {
+    let sandbox = Sandbox::new("responsive");
+    // Enough files that the delete does not finish instantly.
+    for index in 0..400 {
+        std::fs::write(sandbox.0.join(format!("cache/f{index}")), b"x").unwrap();
+    }
+
+    let mut app = app_over(&sandbox.0);
+    press(&mut app, KeyCode::Char('x'));
+    type_word(&mut app, "delete");
+    press(&mut app, KeyCode::Enter);
+
+    // Control comes straight back rather than blocking until it is done.
+    assert!(app.deleting.is_some(), "the deletion should be in flight");
+
+    // And the screen renders, showing progress rather than a frozen frame.
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(screen.contains("Deleting"), "{screen}");
+    assert!(screen.contains("Esc to stop"), "{screen}");
+
+    settle(&mut app);
+    assert!(!sandbox.0.join("cache").exists());
+    assert!(app.status.unwrap().contains("freed"));
+}
+
+#[test]
+fn escape_during_a_deletion_asks_it_to_stop_rather_than_doing_nothing() {
+    let sandbox = Sandbox::new("stoppable");
+    for index in 0..400 {
+        std::fs::write(sandbox.0.join(format!("cache/f{index}")), b"x").unwrap();
+    }
+
+    let mut app = app_over(&sandbox.0);
+    press(&mut app, KeyCode::Char('x'));
+    type_word(&mut app, "delete");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+
+    if let Some(deleting) = &app.deleting {
+        assert!(deleting.is_stopping());
+        let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+        assert!(screen.contains("Stopping"), "{screen}");
+    }
+    settle(&mut app);
+    assert!(app.deleting.is_none());
+}
+
+#[test]
+fn navigation_is_locked_out_while_files_are_being_removed() {
+    let sandbox = Sandbox::new("locked");
+    for index in 0..400 {
+        std::fs::write(sandbox.0.join(format!("cache/f{index}")), b"x").unwrap();
+    }
+
+    let mut app = app_over(&sandbox.0);
+    let cwd = app.cwd.clone();
+    press(&mut app, KeyCode::Char('x'));
+    type_word(&mut app, "delete");
+    press(&mut app, KeyCode::Enter);
+
+    for key in [KeyCode::Right, KeyCode::Down, KeyCode::Char('q')] {
+        press(&mut app, key);
+    }
+    assert_eq!(app.cwd, cwd, "the tree must not move while it is changing");
+    assert!(
+        !app.quit,
+        "quitting mid-delete would abandon a partial removal"
+    );
+
+    settle(&mut app);
+}
+
+#[test]
+#[ignore = "visual check: cargo test -- --ignored --nocapture"]
+fn preview_delete_progress() {
+    let sandbox = Sandbox::new("preview-progress");
+    for index in 0..6000 {
+        let dir = sandbox.0.join(format!("cache/sub{}", index % 40));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("f{index}")), vec![b'x'; 400]).unwrap();
+    }
+
+    let mut app = app_over(&sandbox.0);
+    press(&mut app, KeyCode::Char('x'));
+    type_word(&mut app, "delete");
+    press(&mut app, KeyCode::Enter);
+
+    for frame in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        app.advance();
+        println!("--- frame {frame} (deleting in the background) ---");
+        for line in render_lines(&mut app, 84, 14).unwrap() {
+            if !line.trim().is_empty() {
+                println!("|{line}");
+            }
+        }
+    }
+    settle(&mut app);
+    println!("--- done: {} ---", app.status.clone().unwrap());
 }
