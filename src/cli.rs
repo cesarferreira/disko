@@ -96,6 +96,10 @@ pub struct Options {
     /// Do not record this scan in the snapshot history.
     #[arg(long, global = true)]
     pub no_snapshot: bool,
+
+    /// Disable deleting entirely, for when disko is only ever meant to look.
+    #[arg(long, global = true)]
+    pub read_only: bool,
 }
 
 #[derive(Subcommand, Debug)]

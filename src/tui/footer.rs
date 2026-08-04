@@ -21,11 +21,11 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let roomy = area.width >= 76;
     let keys = match (app.view, roomy) {
         (View::Overview, true) => {
-            "Enter explore   → open   t growth   / search   s sort   d details   q quit"
+            "Enter explore   → open   ← back   t growth   Space mark   x delete   q quit"
         }
         (View::Overview, false) => "Enter explore   t growth   / search   q quit",
         (View::Explorer, true) => {
-            "↑↓ select   Enter open   Backspace up   t growth   Space mark   Esc overview"
+            "↑↓ select   Enter open   ← back   t growth   Space mark   x delete   Esc"
         }
         (View::Explorer, false) => "↑↓ select   Enter open   t growth   Esc back",
         (View::Picker, _) => "↑↓ select   Enter scan   q quit",

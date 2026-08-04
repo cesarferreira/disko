@@ -11,7 +11,31 @@ use disko_core::scan::{self, Cancel, Progress};
 use disko_core::{Diff, DiskEntry, Filesystem, ScanOptions, SizeKind, Unit};
 use disko_render::{RadialNode, palette};
 
+use crate::deletion::{self, Outcome, Target};
 use crate::model::{self, Metric, Row, RowOptions, Sort};
+
+/// The word that has to be typed before anything is removed.
+pub const CONFIRM_WORD: &str = "delete";
+
+/// A pending deletion, waiting to be confirmed or called off.
+#[derive(Clone, Debug, Default)]
+pub struct Confirm {
+    pub targets: Vec<Target>,
+    /// What the user has typed toward [`CONFIRM_WORD`].
+    pub typed: String,
+    /// Set when Enter was pressed before the word was complete.
+    pub nagged: bool,
+}
+
+impl Confirm {
+    pub fn total(&self) -> u64 {
+        self.targets.iter().map(|target| target.size).sum()
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.typed == CONFIRM_WORD
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum View {
@@ -107,6 +131,15 @@ pub struct App {
     /// The comparison behind growth mode, when there is one.
     pub diff: Option<Diff>,
     pub watch: Option<Watch>,
+    /// True when the disk picker is where this scan came from, so "up" from
+    /// the top of the tree has somewhere to go back to.
+    pub from_picker: bool,
+    /// A deletion waiting on confirmation.
+    pub confirm: Option<Confirm>,
+    /// What the last deletion did, shown until the next keystroke.
+    pub outcomes: Vec<Outcome>,
+    /// When set, disko will not delete anything at all.
+    pub read_only: bool,
     session: Option<Session>,
     mode: ScanMode,
 }
@@ -134,6 +167,10 @@ impl App {
             metric: Metric::Size,
             diff: None,
             watch: None,
+            from_picker: false,
+            confirm: None,
+            outcomes: Vec::new(),
+            read_only: false,
             session: None,
             mode: ScanMode::Fresh,
         }
@@ -146,8 +183,10 @@ impl App {
         self
     }
 
-    /// Start straight in a scan instead of the disk picker.
+    /// Start straight in a scan instead of the disk picker. There is no list
+    /// to go back to in this case — the user named the place themselves.
     pub fn with_path(mut self, path: &Path) -> Self {
+        self.from_picker = false;
         self.start_scan(path);
         self
     }
@@ -396,10 +435,21 @@ impl App {
         self.search_active = false;
     }
 
-    /// Back up one level, stopping at the directory the scan started from.
+    /// Back up one level. At the top of the tree that means back to the disk
+    /// list, when that is where this scan came from.
     pub fn go_up(&mut self) {
         if self.cwd == self.root {
-            self.status = Some("already at the top of this scan".into());
+            if self.from_picker {
+                self.return_to_picker();
+            } else {
+                self.status = Some(format!(
+                    "top of this scan — run disko on {} to go higher",
+                    self.root
+                        .parent()
+                        .map(model::display_path)
+                        .unwrap_or_else(|| "the parent".into())
+                ));
+            }
             return;
         }
         let Some(parent) = self.cwd.parent().map(Path::to_path_buf) else {
@@ -415,6 +465,135 @@ impl App {
             .iter()
             .position(|row| row.path.as_ref() == Some(&leaving))
             .unwrap_or(0);
+    }
+
+    /// Ask to delete: everything marked, or whatever is selected if nothing
+    /// is marked.
+    pub fn request_delete(&mut self) {
+        if self.read_only {
+            self.status = Some("disko is running read-only".into());
+            return;
+        }
+        let Some(tree) = &self.tree else { return };
+
+        let paths: Vec<PathBuf> = if self.marks.is_empty() {
+            self.selected_row()
+                .and_then(|row| row.path)
+                .into_iter()
+                .collect()
+        } else {
+            let mut marked: Vec<PathBuf> = self.marks.iter().cloned().collect();
+            marked.sort();
+            marked
+        };
+
+        let targets: Vec<Target> = paths
+            .into_iter()
+            .filter_map(|path| {
+                let entry = tree.resolve(&path)?;
+                Some(Target {
+                    size: entry.size(self.settings.size_kind),
+                    is_dir: entry.is_dir(),
+                    path,
+                })
+            })
+            .collect();
+
+        if targets.is_empty() {
+            self.status = Some("nothing selected to delete".into());
+            return;
+        }
+
+        self.confirm = Some(Confirm {
+            targets,
+            ..Default::default()
+        });
+    }
+
+    pub fn cancel_delete(&mut self) {
+        self.confirm = None;
+        self.status = Some("nothing was deleted".into());
+    }
+
+    pub fn type_confirmation(&mut self, ch: char) {
+        if let Some(confirm) = &mut self.confirm {
+            confirm.typed.push(ch);
+            confirm.nagged = false;
+        }
+    }
+
+    pub fn untype_confirmation(&mut self) {
+        if let Some(confirm) = &mut self.confirm {
+            confirm.typed.pop();
+            confirm.nagged = false;
+        }
+    }
+
+    /// Go through with it, if the word has been typed in full.
+    pub fn commit_delete(&mut self) {
+        let Some(confirm) = &mut self.confirm else {
+            return;
+        };
+        if !confirm.is_armed() {
+            confirm.nagged = true;
+            return;
+        }
+
+        let targets = std::mem::take(&mut confirm.targets);
+        self.confirm = None;
+
+        let Some(tree) = &mut self.tree else { return };
+        let outcomes = deletion::delete_all(&targets, &self.root, tree);
+
+        let freed = deletion::freed(&outcomes);
+        let deleted = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Outcome::Deleted { .. }))
+            .count();
+        let refused = outcomes.len() - deleted;
+
+        for outcome in &outcomes {
+            if let Outcome::Deleted { path, .. } = outcome {
+                self.marks.remove(path);
+            }
+        }
+        self.outcomes = outcomes;
+
+        self.status = Some(match (deleted, refused) {
+            (0, _) => "nothing could be deleted — press d for why".to_string(),
+            (n, 0) => format!(
+                "deleted {n} · freed {}",
+                disko_core::size::format(freed, self.settings.unit)
+            ),
+            (n, skipped) => format!(
+                "deleted {n} · freed {} · {skipped} skipped",
+                disko_core::size::format(freed, self.settings.unit)
+            ),
+        });
+
+        // The row under the cursor may have just been removed.
+        let rows = self.rows().len();
+        self.selection = self.selection.min(rows.saturating_sub(1));
+    }
+
+    /// Drop everything belonging to the current scan and show the disks again.
+    pub fn return_to_picker(&mut self) {
+        self.cancel_scan();
+        self.session = None;
+        self.view = View::Picker;
+        self.tree = None;
+        self.diff = None;
+        self.metric = Metric::Size;
+        self.root = PathBuf::new();
+        self.cwd = PathBuf::new();
+        self.selection = 0;
+        self.search = None;
+        self.search_active = false;
+        // Marks are paths inside the scan that is being left behind.
+        self.marks.clear();
+        self.status = None;
+        // Capacities move while you are busy looking at one disk.
+        self.filesystems = disko_core::mounts::list(self.settings.show_all_filesystems);
     }
 
     pub fn toggle_mark(&mut self) {
@@ -531,6 +710,7 @@ impl App {
             return;
         };
         let mount = fs.mount_point.clone();
+        self.from_picker = true;
         self.start_scan(&mount);
     }
 

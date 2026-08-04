@@ -1,6 +1,7 @@
 //! Terminal setup, the event loop, and the key map.
 
 pub mod app;
+mod confirm;
 mod details;
 mod explorer;
 mod footer;
@@ -101,6 +102,10 @@ fn draw(frame: &mut Frame, app: &mut App, ui: &mut Ui, tick: usize) {
     if app.details {
         details::draw(frame, area, app);
     }
+    // The confirmation sits above everything, including the details panel.
+    if let Some(pending) = app.confirm.clone() {
+        confirm::draw(frame, area, app, &pending);
+    }
 }
 
 /// Draw one frame into an off-screen buffer of the given size.
@@ -145,6 +150,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // A pending deletion owns the keyboard until it is resolved one way or
+    // the other — no navigation key should reach the list behind it.
+    if app.confirm.is_some() {
+        handle_confirm(app, key);
+        return;
+    }
+
     if app.search_active {
         handle_search(app, key);
         return;
@@ -152,11 +164,22 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
     // Any deliberate keystroke means the last message has been read.
     app.status = None;
+    app.outcomes.clear();
 
     match app.view {
         View::Picker => handle_picker(app, key),
         View::Scanning => handle_scanning(app, key),
         View::Overview | View::Explorer => handle_browsing(app, key),
+    }
+}
+
+fn handle_confirm(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.cancel_delete(),
+        KeyCode::Enter => app.commit_delete(),
+        KeyCode::Backspace => app.untype_confirmation(),
+        KeyCode::Char(ch) => app.type_confirmation(ch),
+        _ => {}
     }
 }
 
@@ -203,6 +226,9 @@ fn handle_browsing(app: &mut App, key: KeyEvent) {
                 app.clear_search();
             } else if app.view == View::Explorer {
                 app.view = View::Overview;
+            } else if app.from_picker {
+                // Nothing left to close: step back out to the disk list.
+                app.return_to_picker();
             }
         }
 
@@ -235,6 +261,7 @@ fn handle_browsing(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') => app.toggle_size_kind(),
         KeyCode::Char('t') => app.toggle_metric(),
         KeyCode::Char(' ') => app.toggle_mark(),
+        KeyCode::Char('x') | KeyCode::Delete => app.request_delete(),
         KeyCode::Char('r') => app.rescan(),
         _ => {}
     }
@@ -360,6 +387,68 @@ mod tests {
         assert_eq!(app.cwd, PathBuf::from("/root/small"));
         handle_key(&mut app, press(KeyCode::Backspace));
         assert_eq!(app.cwd, PathBuf::from("/root"));
+    }
+
+    /// The reported bug: after picking a disk, "up" from the top of the tree
+    /// left you stranded with no way back to the list you came from.
+    #[test]
+    fn going_up_from_the_top_returns_to_the_disk_list() {
+        let mut app = test_app();
+        app.from_picker = true;
+        app.cwd = PathBuf::from("/root/big");
+
+        // First press climbs out of the subdirectory...
+        handle_key(&mut app, press(KeyCode::Left));
+        assert_eq!(app.cwd, PathBuf::from("/root"));
+        assert_eq!(app.view, View::Overview);
+
+        // ...the second leaves the scan entirely.
+        handle_key(&mut app, press(KeyCode::Left));
+        assert_eq!(app.view, View::Picker);
+        assert!(app.tree.is_none(), "the finished scan should be released");
+        assert!(!app.quit);
+    }
+
+    #[test]
+    fn backspace_and_escape_leave_the_scan_the_same_way() {
+        for key in [KeyCode::Backspace, KeyCode::Esc, KeyCode::Char('h')] {
+            let mut app = test_app();
+            app.from_picker = true;
+            handle_key(&mut app, press(key));
+            assert_eq!(app.view, View::Picker, "{key:?} should step back out");
+        }
+    }
+
+    /// A path named on the command line has no list behind it, so leaving
+    /// would mean landing nowhere.
+    #[test]
+    fn a_scan_started_from_the_command_line_stays_put() {
+        let mut app = test_app();
+        app.from_picker = false;
+
+        handle_key(&mut app, press(KeyCode::Left));
+
+        assert_eq!(app.view, View::Overview);
+        assert!(app.tree.is_some());
+        let status = app.status.unwrap();
+        assert!(status.contains("top of this scan"), "{status}");
+    }
+
+    #[test]
+    fn leaving_a_scan_forgets_what_belonged_to_it() {
+        let mut app = test_app();
+        app.from_picker = true;
+        app.toggle_mark();
+        app.begin_search();
+        app.push_search('b');
+        assert!(!app.marks.is_empty());
+
+        app.return_to_picker();
+
+        assert!(app.marks.is_empty(), "marks point into the abandoned scan");
+        assert!(app.search.is_none());
+        assert_eq!(app.selection, 0);
+        assert!(app.root.as_os_str().is_empty());
     }
 
     #[test]

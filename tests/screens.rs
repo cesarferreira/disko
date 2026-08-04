@@ -466,3 +466,240 @@ fn preview_growth() {
         println!("|{line}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deleting
+// ---------------------------------------------------------------------------
+
+/// A real tree on disk, so deletion tests exercise the real filesystem.
+struct Sandbox(PathBuf);
+
+impl Sandbox {
+    fn new(tag: &str) -> Self {
+        let mut path = std::env::temp_dir();
+        path.push(format!("disko-screens-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(path.join("cache")).unwrap();
+        std::fs::create_dir_all(path.join("keep")).unwrap();
+        std::fs::write(path.join("cache/blob"), vec![b'x'; 4000]).unwrap();
+        std::fs::write(path.join("keep/notes"), vec![b'x'; 100]).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// An app over a real directory, scanned for real.
+fn app_over(root: &std::path::Path) -> App {
+    let tree = disko_core::scan::scan(
+        root,
+        &ScanOptions::default(),
+        &disko_core::scan::Progress::default(),
+        &disko_core::scan::Cancel::new(),
+    )
+    .unwrap();
+
+    let mut app = App::new(
+        Settings {
+            size_kind: SizeKind::Allocated,
+            unit: Unit::Decimal,
+            top: 20,
+            scan_options: ScanOptions::default(),
+            show_all_filesystems: false,
+            record_snapshots: false,
+        },
+        false,
+    );
+    app.root = tree.path.clone();
+    app.cwd = tree.path.clone();
+    app.tree = Some(tree);
+    app.view = View::Overview;
+    app
+}
+
+fn type_word(app: &mut App, word: &str) {
+    for ch in word.chars() {
+        press(app, KeyCode::Char(ch));
+    }
+}
+
+#[test]
+fn deleting_asks_before_it_does_anything() {
+    let sandbox = Sandbox::new("asks");
+    let mut app = app_over(&sandbox.0);
+
+    press(&mut app, KeyCode::Char('x'));
+
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(screen.contains("This cannot be undone"), "{screen}");
+    assert!(screen.contains("Permanently delete"), "{screen}");
+    assert!(screen.contains("Type delete to confirm"), "{screen}");
+    // Still there, obviously.
+    assert!(sandbox.0.join("cache/blob").exists());
+}
+
+#[test]
+fn escape_calls_the_whole_thing_off() {
+    let sandbox = Sandbox::new("cancel");
+    let mut app = app_over(&sandbox.0);
+
+    press(&mut app, KeyCode::Char('x'));
+    press(&mut app, KeyCode::Esc);
+
+    assert!(app.confirm.is_none());
+    assert!(sandbox.0.join("cache/blob").exists());
+    assert_eq!(app.status.as_deref(), Some("nothing was deleted"));
+}
+
+/// The guard that matters most: Enter on its own must not be enough.
+#[test]
+fn enter_alone_does_not_delete() {
+    let sandbox = Sandbox::new("enter");
+    let mut app = app_over(&sandbox.0);
+
+    press(&mut app, KeyCode::Char('x'));
+    press(&mut app, KeyCode::Enter);
+
+    assert!(app.confirm.is_some(), "the prompt should still be up");
+    assert!(sandbox.0.join("cache/blob").exists());
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(screen.contains("type delete first"), "{screen}");
+}
+
+#[test]
+fn a_half_typed_word_is_not_enough_either() {
+    let sandbox = Sandbox::new("partial");
+    let mut app = app_over(&sandbox.0);
+
+    press(&mut app, KeyCode::Char('x'));
+    type_word(&mut app, "del");
+    press(&mut app, KeyCode::Enter);
+
+    assert!(sandbox.0.join("cache/blob").exists());
+    assert!(app.confirm.is_some());
+}
+
+#[test]
+fn typing_the_word_and_pressing_enter_deletes_and_corrects_the_totals() {
+    let sandbox = Sandbox::new("commit");
+    let mut app = app_over(&sandbox.0);
+    let before = app.current_entry().unwrap().allocated_size;
+
+    // "cache" is the largest, so it is the selected row.
+    press(&mut app, KeyCode::Char('x'));
+    type_word(&mut app, "delete");
+    press(&mut app, KeyCode::Enter);
+
+    assert!(!sandbox.0.join("cache").exists(), "it should be gone");
+    assert!(sandbox.0.join("keep/notes").exists(), "and nothing else");
+
+    // The totals fix themselves without a rescan.
+    let after = app.current_entry().unwrap().allocated_size;
+    assert!(after < before);
+    assert!(app.rows().iter().all(|row| row.name != "cache"));
+
+    let status = app.status.clone().unwrap();
+    assert!(status.starts_with("deleted 1"), "{status}");
+    assert!(status.contains("freed"), "{status}");
+}
+
+#[test]
+fn marked_entries_are_deleted_together() {
+    let sandbox = Sandbox::new("marked");
+    let mut app = app_over(&sandbox.0);
+
+    press(&mut app, KeyCode::Char(' ')); // mark "cache"
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' ')); // mark "keep"
+    press(&mut app, KeyCode::Char('x'));
+
+    let screen = joined(&render_lines(&mut app, 100, 30).unwrap());
+    assert!(screen.contains("Permanently delete 2 items"), "{screen}");
+
+    type_word(&mut app, "delete");
+    press(&mut app, KeyCode::Enter);
+
+    assert!(!sandbox.0.join("cache").exists());
+    assert!(!sandbox.0.join("keep").exists());
+    assert!(
+        app.marks.is_empty(),
+        "marks should not outlive their targets"
+    );
+}
+
+#[test]
+fn navigation_keys_cannot_reach_the_list_behind_the_prompt() {
+    let sandbox = Sandbox::new("modal");
+    let mut app = app_over(&sandbox.0);
+    let cwd = app.cwd.clone();
+
+    press(&mut app, KeyCode::Char('x'));
+    for key in [KeyCode::Down, KeyCode::Right, KeyCode::Left, KeyCode::Tab] {
+        press(&mut app, key);
+    }
+
+    assert_eq!(app.cwd, cwd, "navigation must not happen behind the prompt");
+    assert_eq!(app.selection, 0);
+    assert!(app.confirm.is_some());
+    assert!(sandbox.0.join("cache/blob").exists());
+}
+
+#[test]
+fn read_only_mode_refuses_to_even_ask() {
+    let sandbox = Sandbox::new("readonly");
+    let mut app = app_over(&sandbox.0);
+    app.read_only = true;
+
+    press(&mut app, KeyCode::Char('x'));
+
+    assert!(app.confirm.is_none());
+    assert_eq!(app.status.as_deref(), Some("disko is running read-only"));
+    assert!(sandbox.0.join("cache/blob").exists());
+}
+
+#[test]
+fn the_scan_root_itself_can_never_be_deleted() {
+    let sandbox = Sandbox::new("root");
+    let mut app = app_over(&sandbox.0);
+    // Force the root in as a target, the way no UI path would allow.
+    app.confirm = Some(disko::tui::app::Confirm {
+        targets: vec![disko::deletion::Target {
+            path: sandbox.0.clone(),
+            size: 4000,
+            is_dir: true,
+        }],
+        typed: "delete".to_string(),
+        nagged: false,
+    });
+
+    press(&mut app, KeyCode::Enter);
+
+    assert!(sandbox.0.exists(), "the scanned folder must survive");
+    let status = app.status.clone().unwrap();
+    assert!(status.contains("nothing could be deleted"), "{status}");
+}
+
+#[test]
+fn delete_is_advertised_in_the_footer() {
+    let screen = joined(&render_lines(&mut app(), 100, 30).unwrap());
+    assert!(screen.contains("x delete"), "{screen}");
+}
+
+#[test]
+#[ignore = "visual check: cargo test -- --ignored --nocapture"]
+fn preview_delete_prompt() {
+    let sandbox = Sandbox::new("preview");
+    let mut app = app_over(&sandbox.0);
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('x'));
+    type_word(&mut app, "del");
+    for line in render_lines(&mut app, 88, 20).unwrap() {
+        println!("|{line}");
+    }
+}
