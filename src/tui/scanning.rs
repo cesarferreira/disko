@@ -31,11 +31,16 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, tick: usize) {
     ])];
 
     if let Some(progress) = app.progress() {
+        let elapsed = app
+            .scan_elapsed()
+            .map(|elapsed| format!(" · {}s", elapsed.as_secs()))
+            .unwrap_or_default();
         lines.push(Line::from(Span::styled(
             format!(
-                "{} items · {}",
+                "{} items · {}{}",
                 progress.entries(),
-                format(progress.bytes(), app.settings.unit)
+                format(progress.bytes(), app.settings.unit),
+                elapsed
             ),
             theme::secondary(),
         )));

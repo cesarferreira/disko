@@ -4,13 +4,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use disko_core::scan::{self, Cancel, Progress};
-use disko_core::{DiskEntry, Filesystem, ScanOptions, SizeKind, Unit};
-use disko_render::RadialNode;
+use disko_core::{Diff, DiskEntry, Filesystem, ScanOptions, SizeKind, Unit};
+use disko_render::{RadialNode, palette};
 
-use crate::model::{self, Row, RowOptions, Sort};
+use crate::model::{self, Metric, Row, RowOptions, Sort};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum View {
@@ -31,6 +32,49 @@ pub struct Settings {
     pub top: usize,
     pub scan_options: ScanOptions,
     pub show_all_filesystems: bool,
+    /// Whether finished scans join the snapshot history.
+    pub record_snapshots: bool,
+}
+
+/// Live watching: rescan every `every` seconds and report growth against the
+/// state of the world when watching started.
+#[derive(Clone, Debug)]
+pub struct Watch {
+    pub every: u64,
+    /// The pruned tree the deltas are measured from.
+    baseline: Option<DiskEntry>,
+    started_at: u64,
+    last_scan: Instant,
+    pub rounds: u64,
+}
+
+impl Watch {
+    pub fn new(every: u64) -> Self {
+        Self {
+            every,
+            baseline: None,
+            started_at: disko_core::history::now(),
+            last_scan: Instant::now(),
+            rounds: 0,
+        }
+    }
+
+    pub fn is_due(&self) -> bool {
+        self.last_scan.elapsed() >= Duration::from_secs(self.every)
+    }
+
+    pub fn elapsed(&self) -> u64 {
+        disko_core::history::now().saturating_sub(self.started_at)
+    }
+}
+
+/// How a scan should treat the state around it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ScanMode {
+    /// A new place: reset the cursor and show progress.
+    Fresh,
+    /// The same place again: keep where the user was standing.
+    Refresh,
 }
 
 /// A scan running on another thread.
@@ -38,6 +82,7 @@ struct Session {
     progress: Arc<Progress>,
     cancel: Cancel,
     handle: Option<JoinHandle<Result<DiskEntry>>>,
+    started: Instant,
 }
 
 pub struct App {
@@ -57,7 +102,13 @@ pub struct App {
     pub filesystem: Option<Filesystem>,
     pub status: Option<String>,
     pub quit: bool,
+    /// Measuring size, or measuring what changed.
+    pub metric: Metric,
+    /// The comparison behind growth mode, when there is one.
+    pub diff: Option<Diff>,
+    pub watch: Option<Watch>,
     session: Option<Session>,
+    mode: ScanMode,
 }
 
 impl App {
@@ -80,8 +131,19 @@ impl App {
             filesystem: None,
             status: None,
             quit: false,
+            metric: Metric::Size,
+            diff: None,
+            watch: None,
             session: None,
+            mode: ScanMode::Fresh,
         }
+    }
+
+    /// Rescan on a timer and report growth since the moment watching started.
+    pub fn watching(mut self, watch: Watch) -> Self {
+        self.watch = Some(watch);
+        self.metric = Metric::Growth;
+        self
     }
 
     /// Start straight in a scan instead of the disk picker.
@@ -91,16 +153,34 @@ impl App {
     }
 
     pub fn start_scan(&mut self, path: &Path) {
+        self.begin(path, ScanMode::Fresh);
+    }
+
+    /// Scan the same place again without disturbing the view — what watch mode
+    /// does on every tick, and what `r` does on demand.
+    pub fn refresh(&mut self) {
+        if self.root.as_os_str().is_empty() || self.session.is_some() {
+            return;
+        }
+        let root = self.root.clone();
+        self.begin(&root, ScanMode::Refresh);
+    }
+
+    fn begin(&mut self, path: &Path, mode: ScanMode) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        self.filesystem = disko_core::mounts::for_path(&path);
-        self.root = path.clone();
-        self.cwd = path.clone();
-        self.selection = 0;
-        self.search = None;
-        self.search_active = false;
-        self.tree = None;
-        self.status = None;
-        self.view = View::Scanning;
+        self.mode = mode;
+
+        if mode == ScanMode::Fresh {
+            self.filesystem = disko_core::mounts::for_path(&path);
+            self.root = path.clone();
+            self.cwd = path.clone();
+            self.selection = 0;
+            self.search = None;
+            self.search_active = false;
+            self.tree = None;
+            self.status = None;
+            self.view = View::Scanning;
+        }
 
         let (progress, cancel, handle) =
             scan::scan_in_background(path, self.settings.scan_options.clone());
@@ -108,7 +188,28 @@ impl App {
             progress,
             cancel,
             handle: Some(handle),
+            started: Instant::now(),
         });
+    }
+
+    /// Kick off a rescan when the watch interval is up.
+    pub fn tick_watch(&mut self) {
+        let due = self
+            .watch
+            .as_ref()
+            .is_some_and(|watch| watch.is_due() && self.tree.is_some());
+        if due && self.session.is_none() {
+            self.refresh();
+        }
+    }
+
+    /// How long the running scan has been going. A scan that has stopped
+    /// counting but keeps ticking is usually stuck on a slow mount, and the
+    /// number is the first clue.
+    pub fn scan_elapsed(&self) -> Option<Duration> {
+        self.session
+            .as_ref()
+            .map(|session| session.started.elapsed())
     }
 
     pub fn progress(&self) -> Option<&Progress> {
@@ -135,8 +236,7 @@ impl App {
         };
         match handle.join() {
             Ok(Ok(tree)) => {
-                self.tree = Some(tree);
-                self.view = View::Overview;
+                self.absorb_scan(tree);
             }
             Ok(Err(error)) => {
                 self.status = Some(format!("{error}"));
@@ -149,6 +249,73 @@ impl App {
             }
         }
         self.session = None;
+    }
+
+    /// Take a finished scan: work out what changed, then remember it.
+    ///
+    /// The comparison has to happen before the snapshot is recorded, or this
+    /// scan would be diffed against itself and every week would look quiet.
+    fn absorb_scan(&mut self, tree: DiskEntry) {
+        let kind = self.settings.size_kind;
+
+        match &mut self.watch {
+            Some(watch) => {
+                watch.last_scan = Instant::now();
+                watch.rounds += 1;
+                match &watch.baseline {
+                    Some(baseline) => {
+                        self.diff = Some(disko_core::diff::diff(
+                            baseline,
+                            &tree,
+                            kind,
+                            watch.started_at,
+                            disko_core::history::now(),
+                            disko_core::history::storage_floor(baseline),
+                        ));
+                    }
+                    None => {
+                        // The first pass is the baseline; there is nothing to
+                        // compare it against yet.
+                        watch.baseline = Some(disko_core::history::prune_for_storage(&tree));
+                    }
+                }
+            }
+            None => {
+                self.diff =
+                    crate::commands::record_and_diff(&tree, kind, self.settings.record_snapshots);
+            }
+        }
+
+        self.tree = Some(tree);
+        if self.mode == ScanMode::Fresh {
+            self.view = View::Overview;
+        }
+    }
+
+    /// Switch between "what is big" and "what changed".
+    pub fn toggle_metric(&mut self) {
+        if self.diff.is_none() {
+            self.status = Some(match self.watch.is_some() {
+                true => "waiting for the first rescan".into(),
+                false => "no earlier scan to compare against — this one is now the baseline".into(),
+            });
+            return;
+        }
+        self.metric = match self.metric {
+            Metric::Size => Metric::Growth,
+            Metric::Growth => Metric::Size,
+        };
+        self.selection = 0;
+        self.status = Some(format!("showing {}", self.metric.label()));
+    }
+
+    /// The change tree node for wherever the user is standing.
+    pub fn current_change(&self) -> Option<&disko_core::diff::ChangeNode> {
+        self.diff.as_ref()?.tree.find(&self.cwd)
+    }
+
+    pub fn showing_growth(&self) -> bool {
+        self.metric == Metric::Growth && self.diff.is_some()
     }
 
     pub fn cancel_scan(&mut self) {
@@ -176,6 +343,12 @@ impl App {
         // The explorer draws every wedge, so it must not fold the tail into
         // an "Other" row that has no path to open.
         let cap = self.view != View::Explorer;
+        if self.showing_growth() {
+            return match self.current_change() {
+                Some(node) => model::growth_rows(node, &self.row_options(cap)),
+                None => Vec::new(),
+            };
+        }
         match self.current_entry() {
             Some(entry) => model::rows(entry, &self.row_options(cap)),
             None => Vec::new(),
@@ -334,6 +507,18 @@ impl App {
     /// wedge id back to the path it came from.
     pub fn radial_tree(&self, rings: usize) -> (RadialNode, Vec<PathBuf>) {
         let mut ids = Vec::new();
+
+        if self.showing_growth() {
+            let node = match self.current_change() {
+                Some(change) => {
+                    let scale = biggest_change(change);
+                    build_growth_radial(change, rings, scale, &mut ids)
+                }
+                None => RadialNode::leaf(0, "", 0),
+            };
+            return (node, ids);
+        }
+
         let node = match self.current_entry() {
             Some(entry) => build_radial(entry, self.settings.size_kind, rings, &mut ids),
             None => RadialNode::leaf(0, "", 0),
@@ -385,8 +570,58 @@ fn build_radial(
         id,
         label: entry.name().to_string(),
         size: entry.size(kind),
+        color: None,
         children,
     }
+}
+
+/// The same sunburst, but wedges are sized by how much moved and coloured by
+/// which way: growth glows, shrinkage cools, and anything that stayed put
+/// recedes into the background.
+fn build_growth_radial(
+    node: &disko_core::diff::ChangeNode,
+    rings: usize,
+    scale: i64,
+    ids: &mut Vec<PathBuf>,
+) -> RadialNode {
+    let id = ids.len();
+    ids.push(node.change.path.clone());
+
+    let mut children = Vec::new();
+    if rings > 0 {
+        let mut sorted: Vec<&disko_core::diff::ChangeNode> = node
+            .children
+            .iter()
+            .filter(|child| child.change.delta != 0)
+            .collect();
+        sorted.sort_by_key(|child| std::cmp::Reverse(child.change.delta.abs()));
+        children = sorted
+            .into_iter()
+            .map(|child| build_growth_radial(child, rings - 1, scale, ids))
+            .collect();
+    }
+
+    RadialNode {
+        id,
+        label: node
+            .change
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        size: node.change.delta.unsigned_abs(),
+        color: Some(palette::growth_color(node.change.delta, scale)),
+        children,
+    }
+}
+
+fn biggest_change(node: &disko_core::diff::ChangeNode) -> i64 {
+    node.children
+        .iter()
+        .map(|child| child.change.delta.abs())
+        .max()
+        .unwrap_or(0)
+        .max(1)
 }
 
 #[cfg(test)]
@@ -401,6 +636,8 @@ mod tests {
             top: 20,
             scan_options: ScanOptions::default(),
             show_all_filesystems: false,
+            // Tests must never touch the user's real snapshot history.
+            record_snapshots: false,
         }
     }
 

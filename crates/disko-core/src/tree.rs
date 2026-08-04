@@ -4,11 +4,11 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::size::SizeKind;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryType {
     Directory,
@@ -18,7 +18,7 @@ pub enum EntryType {
 }
 
 /// How much of the truth an entry's sizes represent.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScanState {
     /// Fully walked.
@@ -45,7 +45,7 @@ impl ScanState {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiskEntry {
     pub path: PathBuf,
     /// Sum of file lengths, as `ls` reports.
@@ -55,6 +55,12 @@ pub struct DiskEntry {
     pub entry_type: EntryType,
     /// Number of filesystem entries in this subtree, including this one.
     pub items: u64,
+    /// Newest modification time anywhere in this subtree, in seconds since the
+    /// Unix epoch. This is what answers "when was this last actually used" —
+    /// a 30 GB cache nobody has touched in four months is a very different
+    /// proposition from one that is warm.
+    #[serde(default)]
+    pub modified: u64,
     pub children: Vec<DiskEntry>,
     pub scan_state: ScanState,
 }
@@ -67,6 +73,7 @@ impl DiskEntry {
             allocated_size: 0,
             entry_type,
             items: 1,
+            modified: 0,
             children: Vec::new(),
             scan_state: ScanState::Complete,
         }
@@ -97,6 +104,7 @@ impl DiskEntry {
         self.apparent_size += child.apparent_size;
         self.allocated_size += child.allocated_size;
         self.items += child.items;
+        self.modified = self.modified.max(child.modified);
         self.scan_state = self.scan_state.merge(child.scan_state);
     }
 

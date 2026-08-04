@@ -85,6 +85,57 @@ const PSEUDO_TYPES: &[&str] = &[
     "tracefs",
 ];
 
+/// Filesystems whose contents do not live on this disk, or that answer a
+/// `stat` over a network. Walking one is both useless for "what is filling my
+/// disk" and ruinously slow: a single directory listing on a blob-storage
+/// mount can take five seconds.
+///
+/// `fuseblk` is deliberately absent — that is how local NTFS and exFAT drives
+/// are mounted, and those really are this machine's storage.
+const REMOTE_TYPES: &[&str] = &[
+    "9p",
+    "afpfs",
+    "afs",
+    "beegfs",
+    "ceph",
+    "cifs",
+    "curlftpfs",
+    "davfs",
+    "ftpfs",
+    "fuse",
+    "fuse.rclone",
+    "fuse.s3fs",
+    "fuse.sshfs",
+    "gfs2",
+    "glusterfs",
+    "lustre",
+    "ncpfs",
+    "nfs",
+    "nfs4",
+    "smb2",
+    "smb3",
+    "smbfs",
+    "sshfs",
+    "webdav",
+];
+
+/// True for filesystems that are somewhere else pretending to be here.
+pub fn is_remote(fs_type: &str) -> bool {
+    REMOTE_TYPES.contains(&fs_type)
+        // Most fuse drivers register as `fuse.<driver>`; blobfuse2, sshfs and
+        // rclone all arrive this way.
+        || fs_type.starts_with("fuse.")
+}
+
+/// Every mount point that is not really on this disk.
+pub fn remote_mount_points() -> Vec<PathBuf> {
+    list(true)
+        .into_iter()
+        .filter(|fs| is_remote(&fs.fs_type))
+        .map(|fs| fs.mount_point)
+        .collect()
+}
+
 /// Mount points that exist for the OS's benefit, not the user's.
 const PSEUDO_PREFIXES: &[&str] = &["/proc", "/sys", "/dev", "/run", "/snap", "/var/snap"];
 
@@ -443,6 +494,19 @@ fn os_stat(_mount_point: &Path) -> Option<FsStat> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_filesystems_are_recognised() {
+        assert!(is_remote("nfs4"));
+        assert!(is_remote("cifs"));
+        assert!(is_remote("fuse"));
+        assert!(is_remote("fuse.sshfs"));
+        // A locally mounted NTFS drive is this machine's storage.
+        assert!(!is_remote("fuseblk"));
+        assert!(!is_remote("ext4"));
+        assert!(!is_remote("apfs"));
+        assert!(!is_remote("xfs"));
+    }
 
     #[test]
     fn pseudo_filesystems_are_recognised() {

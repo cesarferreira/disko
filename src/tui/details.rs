@@ -1,5 +1,6 @@
 //! The details panel — everything `duf` shows by default and disko does not.
 
+use disko_core::categories;
 use disko_core::size::{format, format_percent_whole};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -45,14 +46,58 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    if let Some(entry) = app.current_entry() {
+    // The panel describes whatever is selected, falling back to the folder
+    // being explored: "what is this and what has it been doing".
+    let focus = app
+        .selected_row()
+        .and_then(|row| row.path)
+        .or_else(|| app.current_entry().map(|entry| entry.path.clone()));
+
+    if let Some(path) = &focus {
         rows.push((String::new(), String::new()));
-        rows.push(("Folder".into(), model::display_path(&entry.path)));
-        rows.push((
-            "Size".into(),
-            format(entry.size(app.settings.size_kind), unit),
-        ));
-        rows.push(("Items".into(), entry.items.to_string()));
+        rows.push(("Path".into(), model::display_path(path)));
+
+        if let Some(entry) = app.tree.as_ref().and_then(|tree| tree.resolve(path)) {
+            rows.push((
+                "Current size".into(),
+                format(entry.size(app.settings.size_kind), unit),
+            ));
+            rows.push(("Items".into(), entry.items.to_string()));
+            if entry.modified > 0 {
+                rows.push((
+                    "Last used".into(),
+                    crate::timefmt::ago(disko_core::history::now().saturating_sub(entry.modified)),
+                ));
+            }
+        }
+
+        if let Some(diff) = &app.diff
+            && let Some(change) = diff.change_for(path)
+        {
+            rows.push((
+                format!("Change ({})", crate::timefmt::humanize(diff.elapsed())),
+                crate::report::signed(change.delta, unit),
+            ));
+            rows.push((
+                "Was".into(),
+                if change.before_is_bound {
+                    format!("under {}", format(diff_floor(diff), unit))
+                } else {
+                    format(change.before, unit)
+                },
+            ));
+        }
+
+        // Naming what produced something is most of the value in deciding
+        // whether to delete it.
+        if let Some(rule) = categories::classify(path) {
+            rows.push(("Category".into(), rule.label.to_string()));
+            rows.push(("Reclaiming".into(), rule.safety.label().to_string()));
+            if let Some(command) = rule.regenerate {
+                rows.push(("Regenerate".into(), command.to_string()));
+            }
+        }
+
         rows.push((
             "Counting".into(),
             match app.settings.size_kind {
@@ -66,7 +111,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let popup = centered(area, 62, rows.len() as u16 + 2);
+    let popup = centered(area, 66, rows.len() as u16 + 2);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(
@@ -86,6 +131,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         ),
         popup,
     );
+}
+
+/// The snapshot noise floor, recovered from any entry the diff knows was
+/// bounded by it.
+fn diff_floor(diff: &disko_core::Diff) -> u64 {
+    // Snapshots keep entries down to a ten-thousandth of the root.
+    (diff.before_total / 10_000).max(1_000_000)
 }
 
 fn yes_no(value: bool) -> String {

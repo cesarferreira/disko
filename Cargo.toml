@@ -47,6 +47,7 @@ crossterm = "0.28"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 unicode-width = "0.2"
+jiff = "0.2.35"
 
 [profile.release]
 lto = "thin"

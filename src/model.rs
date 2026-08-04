@@ -6,7 +6,27 @@
 
 use std::path::{Path, PathBuf};
 
+use disko_core::diff::ChangeNode;
 use disko_core::{DiskEntry, SizeKind};
+
+/// What the rows and the sunburst are measuring.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum Metric {
+    /// How much space something takes.
+    #[default]
+    Size,
+    /// How much it changed since the last scan.
+    Growth,
+}
+
+impl Metric {
+    pub fn label(self) -> &'static str {
+        match self {
+            Metric::Size => "size",
+            Metric::Growth => "growth",
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum Sort {
@@ -40,6 +60,8 @@ pub struct Row {
     pub path: Option<PathBuf>,
     pub name: String,
     pub size: u64,
+    /// How much this entry changed, when a comparison is loaded.
+    pub delta: Option<i64>,
     pub items: u64,
     /// Share of the parent directory.
     pub fraction: f64,
@@ -51,6 +73,14 @@ pub struct Row {
 impl Row {
     pub fn is_other(&self) -> bool {
         self.path.is_none()
+    }
+
+    /// The number this row is being ranked and drawn by.
+    pub fn magnitude(&self, metric: Metric) -> u64 {
+        match metric {
+            Metric::Size => self.size,
+            Metric::Growth => self.delta.unwrap_or(0).unsigned_abs(),
+        }
     }
 }
 
@@ -110,6 +140,7 @@ pub fn rows(parent: &DiskEntry, options: &RowOptions) -> Vec<Row> {
             path: Some(entry.path.clone()),
             name: entry.name().to_string(),
             size: entry.size(options.size_kind),
+            delta: None,
             items: entry.items,
             fraction: disko_core::size::fraction(entry.size(options.size_kind), total),
             color_index: *rank,
@@ -124,6 +155,7 @@ pub fn rows(parent: &DiskEntry, options: &RowOptions) -> Vec<Row> {
             path: None,
             name: format!("Other ({} entries)", hidden.len()),
             size,
+            delta: None,
             items,
             fraction: disko_core::size::fraction(size, total),
             color_index: usize::MAX,
@@ -159,6 +191,59 @@ fn sort_rows(rows: &mut [Row], sort: Sort) {
     }
 }
 
+/// Rows built from a comparison rather than from a scan.
+///
+/// These come from the change tree, not the current one, so a directory that
+/// was deleted still gets a row — "50 GB freed here" is exactly as much of an
+/// answer as "50 GB appeared there".
+pub fn growth_rows(node: &ChangeNode, options: &RowOptions) -> Vec<Row> {
+    let mut rows: Vec<Row> = node
+        .children
+        .iter()
+        .filter(|child| child.change.delta != 0)
+        .map(|child| Row {
+            path: Some(child.change.path.clone()),
+            name: child
+                .change
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| child.change.path.display().to_string()),
+            size: child.change.after,
+            delta: Some(child.change.delta),
+            items: 0,
+            fraction: 0.0,
+            color_index: 0,
+            is_dir: true,
+        })
+        .collect();
+
+    if let Some(filter) = &options.filter {
+        let needle = filter.to_lowercase();
+        rows.retain(|row| row.name.to_lowercase().contains(&needle));
+    }
+
+    // Biggest movement first, in whichever direction.
+    rows.sort_by_key(|row| std::cmp::Reverse(row.delta.unwrap_or(0).abs()));
+
+    // Bars are drawn relative to the biggest mover in view rather than to the
+    // parent's total: a directory can grow by more than its parent did when
+    // something else shrank.
+    let scale = rows
+        .first()
+        .map(|row| row.delta.unwrap_or(0).unsigned_abs())
+        .unwrap_or(0);
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.color_index = index;
+        row.fraction = disko_core::size::fraction(row.delta.unwrap_or(0).unsigned_abs(), scale);
+    }
+
+    if let Some(top) = options.top {
+        rows.truncate(top);
+    }
+    rows
+}
+
 /// The biggest things two levels down — the "where should I look next" list.
 ///
 /// Direct children answer *what* is big ("Users"), grandchildren answer where
@@ -173,10 +258,17 @@ pub fn largest_items(parent: &DiskEntry, count: usize, size_kind: SizeKind) -> V
 
 /// `/home/cesar/code` -> `~/code`, so paths stay readable in a narrow column.
 pub fn display_path(path: &Path) -> String {
-    let Some(home) = home_dir() else {
+    display_path_from(path, home_dir().as_deref())
+}
+
+/// The same, with the home directory passed in — so tests do not have to
+/// mutate the process environment out from under everything else running in
+/// parallel.
+pub fn display_path_from(path: &Path, home: Option<&Path>) -> String {
+    let Some(home) = home else {
         return path.display().to_string();
     };
-    match path.strip_prefix(&home) {
+    match path.strip_prefix(home) {
         Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
         Ok(relative) => format!("~/{}", relative.display()),
         Err(_) => path.display().to_string(),
@@ -329,10 +421,14 @@ mod tests {
 
     #[test]
     fn paths_under_home_are_collapsed() {
-        // SAFETY: single-threaded test setting an env var it also reads.
-        unsafe { std::env::set_var("HOME", "/home/tester") };
-        assert_eq!(display_path(Path::new("/home/tester/code")), "~/code");
-        assert_eq!(display_path(Path::new("/home/tester")), "~");
-        assert_eq!(display_path(Path::new("/var/log")), "/var/log");
+        let home = Some(Path::new("/home/tester"));
+        assert_eq!(
+            display_path_from(Path::new("/home/tester/code"), home),
+            "~/code"
+        );
+        assert_eq!(display_path_from(Path::new("/home/tester"), home), "~");
+        assert_eq!(display_path_from(Path::new("/var/log"), home), "/var/log");
+        // With no home to compare against, a path is just a path.
+        assert_eq!(display_path_from(Path::new("/var/log"), None), "/var/log");
     }
 }

@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::model::{self, Row};
+use crate::report::signed;
 use crate::tui::app::App;
 use crate::tui::text::{fit, width};
 use crate::tui::theme;
@@ -68,7 +69,10 @@ fn split_body(app: &App, area: Rect, row_count: usize) -> (u16, u16) {
 
     let wanted = row_count.max(1);
     let largest_available = body.saturating_sub(wanted);
-    let largest = if largest_available >= LARGEST_MIN && app.current_entry().is_some() {
+    let largest = if largest_available >= LARGEST_MIN
+        && app.current_entry().is_some()
+        && !app.showing_growth()
+    {
         largest_available.min(LARGEST_ITEMS + 2)
     } else {
         0
@@ -145,6 +149,24 @@ fn draw_current_folder(frame: &mut Frame, area: Rect, app: &App) {
         ),
     ];
 
+    // When growth is on screen, say how much and over what period — a column
+    // of "+2 GB" means nothing without knowing whether that was an hour or a
+    // month.
+    if let (true, Some(diff)) = (app.showing_growth(), &app.diff) {
+        spans.push(Span::raw("    "));
+        spans.push(Span::styled(
+            format!(
+                "{} in {}",
+                signed(diff.total_delta(), unit),
+                crate::timefmt::humanize(diff.elapsed())
+            ),
+            Style::default().fg(theme::color(palette::growth_color(
+                diff.total_delta(),
+                diff.total_delta().abs().max(1),
+            ))),
+        ));
+    }
+
     if let Some(note) = incomplete_note(entry) {
         spans.push(Span::raw("    "));
         spans.push(Span::styled(note, theme::warning()));
@@ -159,8 +181,8 @@ fn incomplete_note(entry: &DiskEntry) -> Option<String> {
         ScanState::Complete => None,
         ScanState::Denied => Some("unreadable".to_string()),
         ScanState::Cancelled => Some("scan cancelled — sizes incomplete".to_string()),
-        ScanState::Skipped => Some("not scanned".to_string()),
-        ScanState::Partial => Some("some folders unreadable".to_string()),
+        ScanState::Skipped => Some("not scanned — network mount".to_string()),
+        ScanState::Partial => Some("some folders skipped or unreadable".to_string()),
     }
 }
 
@@ -168,6 +190,8 @@ fn draw_rows(frame: &mut Frame, area: Rect, app: &App, rows: &[Row], list_state:
     if rows.is_empty() {
         let message = if app.search.is_some() {
             "nothing matches that search"
+        } else if app.showing_growth() {
+            "nothing here changed"
         } else {
             "this folder is empty"
         };
@@ -176,11 +200,22 @@ fn draw_rows(frame: &mut Frame, area: Rect, app: &App, rows: &[Row], list_state:
     }
 
     let unit = app.settings.unit;
-    let show_percent = area.width >= PERCENT_MIN_WIDTH;
+    let growth = app.showing_growth();
+    let show_percent = area.width >= PERCENT_MIN_WIDTH && !growth;
+
+    // In growth mode the leading column is the signed change, which is what
+    // the whole view exists to show; the current size moves to the right.
+    let amount = |row: &Row| -> String {
+        if growth {
+            signed(row.delta.unwrap_or(0), unit)
+        } else {
+            format(row.size, unit)
+        }
+    };
 
     let size_width = rows
         .iter()
-        .map(|row| width(&format(row.size, unit)))
+        .map(|row| width(&amount(row)))
         .max()
         .unwrap_or(8);
     let name_width = rows
@@ -189,7 +224,19 @@ fn draw_rows(frame: &mut Frame, area: Rect, app: &App, rows: &[Row], list_state:
         .max()
         .unwrap_or(12)
         .clamp(10, 28);
-    let percent_width = if show_percent { 7 } else { 0 };
+    let percent_width = if show_percent {
+        7
+    } else if growth {
+        11
+    } else {
+        0
+    };
+    let scale = rows
+        .iter()
+        .map(|row| row.delta.unwrap_or(0).abs())
+        .max()
+        .unwrap_or(1)
+        .max(1);
 
     // Marker, size, name, then whatever is left goes to the bar.
     let fixed = 2 + size_width + 2 + name_width + 2 + percent_width;
@@ -200,7 +247,9 @@ fn draw_rows(frame: &mut Frame, area: Rect, app: &App, rows: &[Row], list_state:
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| {
-            let color = if row.is_other() {
+            let color = if growth {
+                palette::growth_color(row.delta.unwrap_or(0), scale)
+            } else if row.is_other() {
                 palette::CATEGORICAL[7]
             } else {
                 palette::categorical(row.color_index)
@@ -212,10 +261,7 @@ fn draw_rows(frame: &mut Frame, area: Rect, app: &App, rows: &[Row], list_state:
 
             let mut spans = vec![
                 Span::styled(if marked { "✓ " } else { "  " }, theme::accent()),
-                Span::styled(
-                    format!("{:>size_width$}", format(row.size, unit)),
-                    theme::heading(),
-                ),
+                Span::styled(format!("{:>size_width$}", amount(row)), theme::heading()),
                 Span::raw("  "),
                 Span::raw(fit(&row.name, name_width)),
                 Span::raw("  "),
@@ -228,6 +274,13 @@ fn draw_rows(frame: &mut Frame, area: Rect, app: &App, rows: &[Row], list_state:
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(
                     format!("{:>5}", format_percent(row.fraction)),
+                    theme::muted(),
+                ));
+            } else if growth {
+                // What it is now, so a "+2 GB" has something to be 2 GB of.
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("{:>9}", format(row.size, unit)),
                     theme::muted(),
                 ));
             }
@@ -244,6 +297,11 @@ fn draw_rows(frame: &mut Frame, area: Rect, app: &App, rows: &[Row], list_state:
 }
 
 fn draw_largest(frame: &mut Frame, area: Rect, app: &App) {
+    // In growth mode the ranked list already answers "where should I look
+    // next"; a second list of merely-large things would compete with it.
+    if app.showing_growth() {
+        return;
+    }
     let Some(entry) = app.current_entry() else {
         return;
     };
