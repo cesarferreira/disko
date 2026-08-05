@@ -21,7 +21,10 @@ const QUIT: Hint = ("q", "quit");
 
 const GAP: usize = 3;
 
-pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
+/// `note` is what the screen above wants said in the right-hand slot when it
+/// has nothing more urgent to report — the explorer uses it to admit when the
+/// selected wedge is too small to place.
+pub fn draw(frame: &mut Frame, area: Rect, app: &App, note: Option<String>) {
     if app.search_active {
         draw_search(frame, area, app);
         return;
@@ -32,7 +35,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     // The status earns its place only if there is room left after the keys.
     let room_for_status = total.saturating_sub(minimum_width(app) + GAP);
     let right = if room_for_status >= 8 {
-        truncate(&status(app), room_for_status)
+        truncate(&status(app, note), room_for_status)
     } else {
         String::new()
     };
@@ -143,7 +146,7 @@ fn hints_for(view: View) -> &'static [Hint] {
 }
 
 /// The right-hand slot shows the most useful thing available.
-fn status(app: &App) -> String {
+fn status(app: &App, note: Option<String>) -> String {
     if !app.marks.is_empty() {
         format!(
             "{} marked · {}",
@@ -152,6 +155,8 @@ fn status(app: &App) -> String {
         )
     } else if let Some(status) = &app.status {
         status.clone()
+    } else if let Some(note) = note {
+        note
     } else if let Some(watch) = &app.watch {
         format!(
             "watching · every {}s · {}",

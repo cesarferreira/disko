@@ -69,7 +69,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, tick: usize) {
         chunks[1],
     );
     draw_found(frame, chunks[2], app);
-    crate::tui::footer::draw(frame, chunks[3], app);
+    crate::tui::footer::draw(frame, chunks[3], app, None);
 }
 
 /// The biggest things counted so far.

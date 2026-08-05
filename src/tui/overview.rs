@@ -49,7 +49,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, list_state: &mut ListState
     if largest_height > 0 {
         draw_largest(frame, chunks[6], app);
     }
-    crate::tui::footer::draw(frame, chunks[8], app);
+    crate::tui::footer::draw(frame, chunks[8], app, None);
 }
 
 /// Divide the space between the header and the footer.

@@ -174,6 +174,9 @@ fn nothing_overflows_the_terminal_width() {
         for view in [View::Overview, View::Explorer, View::Picker] {
             let mut app = app();
             app.view = view;
+            // A small entry, so the explorer's "too small to place" note is on
+            // screen: it is the longest thing the breadcrumb line ever carries.
+            app.selection = 5;
             for line in render_lines(&mut app, width, 30).unwrap() {
                 assert!(
                     line.chars().count() <= width as usize,
@@ -248,11 +251,12 @@ fn selecting_a_small_entry_still_moves_the_highlight() {
     );
 }
 
-/// The same bug at the scale it was reported: a real `~/Library` is a handful
-/// of huge entries and a long tail of tiny ones, and *every* row has to light
-/// something up, not just the ones big enough to see.
+/// A real `~/Library` is a handful of huge entries and a long tail of tiny
+/// ones. Every row has to change the chart — for the tail that means the
+/// highlight band takes the colour of the row you are on, since the entries
+/// themselves share a pixel of arc and cannot be told apart.
 #[test]
-fn every_row_of_a_long_tail_lights_up_its_own_wedge() {
+fn every_row_of_a_long_tail_changes_the_chart() {
     const MB: u64 = 1_000_000;
     const KB: u64 = 1_000;
 
@@ -311,6 +315,36 @@ fn every_row_of_a_long_tail_lights_up_its_own_wedge() {
             selection - 1
         );
     }
+}
+
+/// A highlight on a sub-pixel wedge can only honestly mean "somewhere in this
+/// run", so the screen says so rather than let the cursor look stuck.
+#[test]
+fn the_breadcrumb_admits_when_a_wedge_is_too_small_to_place() {
+    let screen_for = |selection: usize| {
+        let mut app = app();
+        app.view = View::Explorer;
+        app.selection = selection;
+        render_lines(&mut app, 100, 30).unwrap()
+    };
+
+    // /Users is 64% of the disk: its wedge is most of the ring.
+    let big = screen_for(0);
+    assert!(!joined(&big).contains("too small"), "{}", joined(&big));
+
+    // /opt is 0.7%, which is a fraction of a pixel of arc.
+    let tail = screen_for(5);
+    assert!(
+        tail[0].contains("0.7% of this folder — too small to place"),
+        "{}",
+        tail[0]
+    );
+    // The note lives up there precisely so the keys keep their room.
+    assert!(
+        tail.last().unwrap().contains("x delete"),
+        "{:?}",
+        tail.last()
+    );
 }
 
 #[test]

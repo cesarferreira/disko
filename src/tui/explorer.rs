@@ -2,7 +2,7 @@
 //! tying every wedge to a name and a size.
 
 use disko_core::size::format;
-use disko_render::radial::{self, LayoutOptions, RenderOptions, Segment};
+use disko_render::radial::{self, Drawn, LayoutOptions, RenderOptions, Segment};
 use disko_render::{BrailleCanvas, Canvas, palette};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -32,6 +32,18 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     .horizontal_margin(1)
     .split(area);
 
+    let legend_width = LEGEND_WIDTH.min(chunks[2].width.saturating_sub(20));
+    let body = Layout::horizontal([Constraint::Min(20), Constraint::Length(legend_width)])
+        .split(chunks[2]);
+
+    let rows = app.rows();
+    let drawn = draw_chart(frame, body[0], app, &rows);
+    if legend_width > 0 {
+        draw_legend(frame, body[1], app, &rows);
+    }
+
+    // The breadcrumb comes after the chart because what the chart could draw
+    // decides what this line has to admit.
     let mut crumbs = vec![Span::styled(app.breadcrumb(), theme::heading())];
     if let Some(taken_at) = app.provisional {
         let age = disko_core::history::now().saturating_sub(taken_at);
@@ -40,24 +52,37 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
             theme::warning(),
         ));
     }
+    if let Some(note) = note(app, &rows, drawn) {
+        crumbs.push(Span::styled(format!("   {note}"), theme::secondary()));
+    }
     frame.render_widget(Paragraph::new(Line::from(crumbs)), chunks[0]);
 
-    let legend_width = LEGEND_WIDTH.min(chunks[2].width.saturating_sub(20));
-    let body = Layout::horizontal([Constraint::Min(20), Constraint::Length(legend_width)])
-        .split(chunks[2]);
-
-    let rows = app.rows();
-    draw_chart(frame, body[0], app, &rows);
-    if legend_width > 0 {
-        draw_legend(frame, body[1], app, &rows);
-    }
-
-    crate::tui::footer::draw(frame, chunks[3], app);
+    crate::tui::footer::draw(frame, chunks[3], app, None);
 }
 
-fn draw_chart(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
+/// What the chart could not say for itself.
+///
+/// Anything under about a percent of a directory is a fraction of a pixel of
+/// arc, and a long tail of them shares one pixel. The highlight covers the
+/// whole run in that case, so this says as much — a cursor that moves while the
+/// chart does not otherwise just looks broken.
+///
+/// It goes on the breadcrumb line rather than in the footer: the keys are worth
+/// more than a note, and the footer would drop two of them to fit it.
+fn note(app: &App, rows: &[Row], drawn: Drawn) -> Option<String> {
+    if !drawn.selection_is_a_run {
+        return None;
+    }
+    let share = rows.get(app.selection)?.fraction * 100.0;
+    Some(match share {
+        share if share >= 0.1 => format!("{share:.1}% of this folder — too small to place"),
+        _ => "under 0.1% of this folder — too small to place".to_string(),
+    })
+}
+
+fn draw_chart(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) -> Drawn {
     if area.width < 8 || area.height < 4 {
-        return;
+        return Drawn::default();
     }
 
     let cache = app.radial_tree(RINGS);
@@ -87,7 +112,7 @@ fn draw_chart(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
         ..Default::default()
     };
 
-    let lines = if theme::colors_disabled() {
+    let (lines, drawn) = if theme::colors_disabled() {
         outline_lines(&segments, area, &options)
     } else {
         color_lines(&segments, area, &options)
@@ -95,13 +120,18 @@ fn draw_chart(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
 
     frame.render_widget(Paragraph::new(lines), area);
     draw_hole(frame, area, app);
+    drawn
 }
 
-fn color_lines(segments: &[Segment], area: Rect, options: &RenderOptions) -> Vec<Line<'static>> {
+fn color_lines(
+    segments: &[Segment],
+    area: Rect,
+    options: &RenderOptions,
+) -> (Vec<Line<'static>>, Drawn) {
     let mut canvas = Canvas::new(area.width as usize, area.height as usize);
-    radial::render(segments, &mut canvas, options);
+    let drawn = radial::render(segments, &mut canvas, options);
 
-    canvas
+    let lines = canvas
         .cell_rows()
         .into_iter()
         .map(|row| {
@@ -125,13 +155,18 @@ fn color_lines(segments: &[Segment], area: Rect, options: &RenderOptions) -> Vec
                     .collect::<Vec<_>>(),
             )
         })
-        .collect()
+        .collect();
+    (lines, drawn)
 }
 
-fn outline_lines(segments: &[Segment], area: Rect, options: &RenderOptions) -> Vec<Line<'static>> {
+fn outline_lines(
+    segments: &[Segment],
+    area: Rect,
+    options: &RenderOptions,
+) -> (Vec<Line<'static>>, Drawn) {
     let mut canvas = BrailleCanvas::new(area.width as usize, area.height as usize);
-    radial::render_outline(segments, &mut canvas, options);
-    canvas.lines().into_iter().map(Line::from).collect()
+    let drawn = radial::render_outline(segments, &mut canvas, options);
+    (canvas.lines().into_iter().map(Line::from).collect(), drawn)
 }
 
 /// The hole in the middle carries the total for the directory you are in —

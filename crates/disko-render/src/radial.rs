@@ -231,26 +231,66 @@ fn turn_of(dx: f64, dy: f64) -> f64 {
     (dx.atan2(-dy).rem_euclid(TAU)) / TAU
 }
 
-/// Where the highlight goes: the selected wedge's slice of one ring, widened
-/// about its midpoint until it is wide enough to see.
+/// What the rasteriser was able to say about the selection at the size it drew.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Drawn {
+    /// Set when the selected wedge is thinner than a pixel, so its highlight
+    /// stands for the run of too-small wedges around it rather than for that
+    /// one entry. Say so on screen: the chart cannot tell them apart, and
+    /// pretending otherwise is what makes the cursor look broken.
+    pub selection_is_a_run: bool,
+}
+
+/// Where the highlight goes: one slice of one ring.
 struct Highlight {
     depth: usize,
     middle: f64,
     half_span: f64,
     color: Rgb,
+    /// Whether the band stands for more than the selected wedge alone.
+    is_a_run: bool,
 }
 
 impl Highlight {
-    fn of(segments: &[Segment], geometry: &Geometry, selected: Option<usize>) -> Option<Self> {
+    /// The band for the selected wedge.
+    ///
+    /// A wedge wide enough to see gets exactly its own arc. One that is not —
+    /// which in a large directory is most of them — gets the whole contiguous
+    /// run of siblings that are also too small, so the highlight says "somewhere
+    /// in here" instead of pointing a three-pixel finger at a random neighbour.
+    fn resolve(segments: &[Segment], geometry: &Geometry, selected: Option<usize>) -> Option<Self> {
         let id = selected?;
-        let segment = segments.iter().find(|segment| segment.id == id)?;
-        let radius = geometry.radius_of_ring(segment.depth);
+        let selected = segments.iter().find(|segment| segment.id == id)?;
+        let radius = geometry.radius_of_ring(selected.depth);
+        let visible = |segment: &Segment| segment.span() * TAU * radius >= MIN_HIGHLIGHT_PIXELS;
+
+        // The wedges sharing this ring, in the order they were placed around it.
+        let ring: Vec<&Segment> = segments
+            .iter()
+            .filter(|segment| segment.depth == selected.depth)
+            .collect();
+        let at = ring.iter().position(|segment| segment.id == id)?;
+
+        let (mut first, mut last) = (at, at);
+        let is_a_run = !visible(selected);
+        if is_a_run {
+            while first > 0 && !visible(ring[first - 1]) {
+                first -= 1;
+            }
+            while last + 1 < ring.len() && !visible(ring[last + 1]) {
+                last += 1;
+            }
+        }
+
+        // Even a run can come to less than a pixel, so the floor still applies.
+        let span = ring[last].end - ring[first].start;
         let floor = MIN_HIGHLIGHT_PIXELS / (TAU * radius);
         Some(Self {
-            depth: segment.depth,
-            middle: segment.midpoint(),
-            half_span: segment.span().max(floor) / 2.0,
-            color: palette::shade(segment.color, SELECTED_SHADE),
+            depth: selected.depth,
+            middle: (ring[first].start + ring[last].end) / 2.0,
+            half_span: span.max(floor) / 2.0,
+            color: palette::shade(selected.color, SELECTED_SHADE),
+            is_a_run,
         })
     }
 
@@ -264,13 +304,18 @@ impl Highlight {
 
 /// Paint `segments` into `canvas`. Pixels outside the disc are left alone, so
 /// a caller can compose the sunburst over something else.
-pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions) {
+pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions) -> Drawn {
     let geometry = Geometry::new(canvas.width(), canvas.height(), options);
     if geometry.ring_thickness <= 0.0 {
-        return;
+        return Drawn::default();
     }
 
-    let highlight = Highlight::of(segments, &geometry, options.selected);
+    let highlight = Highlight::resolve(segments, &geometry, options.selected);
+    let drawn = Drawn {
+        selection_is_a_run: highlight
+            .as_ref()
+            .is_some_and(|highlight| highlight.is_a_run),
+    };
 
     for y in 0..canvas.height() {
         for x in 0..canvas.width() {
@@ -324,6 +369,8 @@ pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions
             canvas.set(x, y, shade_for(segment, options));
         }
     }
+
+    drawn
 }
 
 fn shade_for(segment: &Segment, options: &RenderOptions) -> Rgb {
@@ -336,10 +383,14 @@ fn shade_for(segment: &Segment, options: &RenderOptions) -> Rgb {
 
 /// Draw ring arcs and wedge dividers as dots. The monochrome fallback for
 /// terminals without truecolor, and a cleaner look on light backgrounds.
-pub fn render_outline(segments: &[Segment], canvas: &mut BrailleCanvas, options: &RenderOptions) {
+pub fn render_outline(
+    segments: &[Segment],
+    canvas: &mut BrailleCanvas,
+    options: &RenderOptions,
+) -> Drawn {
     let geometry = Geometry::new(canvas.width(), canvas.height(), options);
     if geometry.ring_thickness <= 0.0 {
-        return;
+        return Drawn::default();
     }
 
     let plot = |radius: f64, turn: f64, canvas: &mut BrailleCanvas| {
@@ -367,6 +418,13 @@ pub fn render_outline(segments: &[Segment], canvas: &mut BrailleCanvas, options:
             let radius = inner + step as f64;
             plot(radius.min(outer), segment.start, canvas);
         }
+    }
+
+    // Dots carry no colour, so there is no highlight here — but the selection
+    // is just as unplaceable, and the caller says so the same way.
+    Drawn {
+        selection_is_a_run: Highlight::resolve(segments, &geometry, options.selected)
+            .is_some_and(|highlight| highlight.is_a_run),
     }
 }
 
@@ -517,6 +575,52 @@ mod tests {
             .filter(|&(x, y)| canvas.get(x, y) == Some(wanted))
             .count();
         assert!(lit > 0, "the selected sliver should still be visible");
+    }
+
+    /// Entries under about a percent share one pixel of arc, so a highlight on
+    /// one of them can only honestly mean "somewhere in this run". The band
+    /// covers the run, and the caller is told so it can say as much.
+    #[test]
+    fn a_run_of_too_small_wedges_is_highlighted_together() {
+        let tail: Vec<RadialNode> = (1..=6).map(|index| node(index, 20, vec![])).collect();
+        let mut children = vec![node(100, 9_880, vec![])];
+        children.extend(tail);
+        let root = node(0, 10_000, children);
+        let segments = layout(&root, &LayoutOptions::default());
+
+        // Pixels painted in the selected wedge's own highlight colour.
+        let painted = |selected: usize| {
+            let mut canvas = Canvas::new(40, 20);
+            let drawn = render(
+                &segments,
+                &mut canvas,
+                &RenderOptions {
+                    selected: Some(selected),
+                    ..Default::default()
+                },
+            );
+            let wanted = palette::shade(
+                segments.iter().find(|s| s.id == selected).unwrap().color,
+                SELECTED_SHADE,
+            );
+            let lit = (0..canvas.height())
+                .flat_map(|y| (0..canvas.width()).map(move |x| (x, y)))
+                .filter(|&(x, y)| canvas.get(x, y) == Some(wanted))
+                .count();
+            (drawn, lit)
+        };
+
+        let (big, _) = painted(100);
+        assert!(
+            !big.selection_is_a_run,
+            "a wedge filling the circle is placeable on its own"
+        );
+
+        let (small, lit) = painted(3);
+        assert!(small.selection_is_a_run, "a 0.2% wedge is not placeable");
+        // One of these wedges is a fraction of a pixel of arc; what got painted
+        // is the run of six around it.
+        assert!(lit >= 3, "expected a visible band, painted {lit} pixels");
     }
 
     #[test]
