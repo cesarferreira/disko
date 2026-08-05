@@ -233,6 +233,7 @@ Press `Enter` for a DaisyDisk-style sunburst you can walk into.
 | `d` | details — device, type, inodes, change, category |
 | `a` | apparent sizes instead of blocks used |
 | `o` | show it in Finder / your file manager |
+| `y` `c` | copy the selected path to the clipboard |
 | `Space` | mark an entry; the footer totals what you marked |
 | **`x`** | **delete what is marked** (or the selection), after confirmation |
 | `r` | rescan |

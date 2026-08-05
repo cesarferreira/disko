@@ -60,21 +60,26 @@ fn draw_chart(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
         return;
     }
 
-    let (root, ids) = app.radial_tree(RINGS);
-    let segments = radial::layout(
-        &root,
-        &LayoutOptions {
-            rings: RINGS,
-            ..Default::default()
-        },
-    );
+    let cache = app.radial_tree(RINGS);
 
     // The selected row and the highlighted wedge are the same thing seen two
     // ways, so they are looked up from one source: the selected path.
     let selected_id = rows
         .get(app.selection)
-        .and_then(|row| row.path.as_ref())
-        .and_then(|path| ids.iter().position(|candidate| candidate == path));
+        .and_then(|row| row.path.as_deref())
+        .and_then(|path| cache.id_of(path));
+
+    let segments = radial::layout(
+        &cache.root,
+        &LayoutOptions {
+            rings: RINGS,
+            // Most of a big directory is slivers, and the row under the cursor
+            // is usually one of them. Place it regardless so the highlight has
+            // somewhere to land.
+            pinned: selected_id,
+            ..Default::default()
+        },
+    );
 
     let options = RenderOptions {
         rings: RINGS,

@@ -70,6 +70,10 @@ pub struct LayoutOptions {
     /// thousandth of a circle they are narrower than a pixel and only add
     /// speckle.
     pub min_span: f64,
+    /// One id that is placed however thin it is. The wedge under the cursor
+    /// has to exist even when it is a sliver, or there is nothing for the
+    /// highlight to point at.
+    pub pinned: Option<usize>,
 }
 
 impl Default for LayoutOptions {
@@ -77,6 +81,7 @@ impl Default for LayoutOptions {
         Self {
             rings: 3,
             min_span: 0.0015,
+            pinned: None,
         }
     }
 }
@@ -128,7 +133,7 @@ fn place(
             }
         };
 
-        if span >= options.min_span {
+        if span >= options.min_span || options.pinned == Some(node.id) {
             out.push(Segment {
                 id: node.id,
                 depth,
@@ -180,6 +185,16 @@ impl Default for RenderOptions {
     }
 }
 
+/// How much lighter the selected wedge is drawn, and how much darker every
+/// other one goes to get out of its way.
+const SELECTED_SHADE: f32 = 1.45;
+const DIMMED_SHADE: f32 = 0.55;
+
+/// The narrowest a highlight is ever drawn, in pixels of arc. Most wedges in a
+/// large directory are thinner than a pixel, and a highlight nobody can see is
+/// the same as no highlight at all.
+const MIN_HIGHLIGHT_PIXELS: f64 = 3.0;
+
 /// Geometry shared by the rasteriser and the label placement, so a label
 /// always lands on the wedge it names.
 struct Geometry {
@@ -216,6 +231,37 @@ fn turn_of(dx: f64, dy: f64) -> f64 {
     (dx.atan2(-dy).rem_euclid(TAU)) / TAU
 }
 
+/// Where the highlight goes: the selected wedge's slice of one ring, widened
+/// about its midpoint until it is wide enough to see.
+struct Highlight {
+    depth: usize,
+    middle: f64,
+    half_span: f64,
+    color: Rgb,
+}
+
+impl Highlight {
+    fn of(segments: &[Segment], geometry: &Geometry, selected: Option<usize>) -> Option<Self> {
+        let id = selected?;
+        let segment = segments.iter().find(|segment| segment.id == id)?;
+        let radius = geometry.radius_of_ring(segment.depth);
+        let floor = MIN_HIGHLIGHT_PIXELS / (TAU * radius);
+        Some(Self {
+            depth: segment.depth,
+            middle: segment.midpoint(),
+            half_span: segment.span().max(floor) / 2.0,
+            color: palette::shade(segment.color, SELECTED_SHADE),
+        })
+    }
+
+    /// Turns wrap at twelve o'clock, so the distance between two of them is
+    /// whichever way round the circle is shorter.
+    fn covers(&self, depth: usize, turn: f64) -> bool {
+        let gap = (turn - self.middle).abs();
+        depth == self.depth && gap.min(1.0 - gap) <= self.half_span
+    }
+}
+
 /// Paint `segments` into `canvas`. Pixels outside the disc are left alone, so
 /// a caller can compose the sunburst over something else.
 pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions) {
@@ -223,6 +269,8 @@ pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions
     if geometry.ring_thickness <= 0.0 {
         return;
     }
+
+    let highlight = Highlight::of(segments, &geometry, options.selected);
 
     for y in 0..canvas.height() {
         for x in 0..canvas.width() {
@@ -248,6 +296,17 @@ pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions
             }
 
             let turn = turn_of(dx, dy);
+
+            // The highlight is painted straight over the ring, dividers and
+            // all: a wedge widened to three pixels has nothing left to spare
+            // for a gap on either side of it.
+            if let Some(highlight) = &highlight
+                && highlight.covers(depth, turn)
+            {
+                canvas.set(x, y, highlight.color);
+                continue;
+            }
+
             let Some(segment) = segments
                 .iter()
                 .find(|s| s.depth == depth && s.contains(turn))
@@ -269,8 +328,8 @@ pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions
 
 fn shade_for(segment: &Segment, options: &RenderOptions) -> Rgb {
     match options.selected {
-        Some(id) if id == segment.id => palette::shade(segment.color, 1.45),
-        Some(_) => palette::shade(segment.color, 0.55),
+        Some(id) if id == segment.id => palette::shade(segment.color, SELECTED_SHADE),
+        Some(_) => palette::shade(segment.color, DIMMED_SHADE),
         None => segment.color,
     }
 }
@@ -412,6 +471,52 @@ mod tests {
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].id, 1);
+    }
+
+    #[test]
+    fn a_pinned_sliver_is_placed_anyway() {
+        let root = node(0, 10_000, vec![node(1, 9_999, vec![]), node(2, 1, vec![])]);
+        let segments = layout(
+            &root,
+            &LayoutOptions {
+                pinned: Some(2),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[1].id, 2);
+    }
+
+    /// The reported bug: selecting anything past the biggest few entries dimmed
+    /// the whole chart and lit nothing up, because the wedge it named was
+    /// thinner than a pixel.
+    #[test]
+    fn selecting_a_sliver_still_lights_pixels_up() {
+        let root = node(0, 10_000, vec![node(1, 9_999, vec![]), node(2, 1, vec![])]);
+        let segments = layout(
+            &root,
+            &LayoutOptions {
+                pinned: Some(2),
+                ..Default::default()
+            },
+        );
+        let mut canvas = Canvas::new(40, 20);
+        render(
+            &segments,
+            &mut canvas,
+            &RenderOptions {
+                selected: Some(2),
+                ..Default::default()
+            },
+        );
+
+        let wanted = palette::shade(segments[1].color, SELECTED_SHADE);
+        let lit = (0..canvas.height())
+            .flat_map(|y| (0..canvas.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| canvas.get(x, y) == Some(wanted))
+            .count();
+        assert!(lit > 0, "the selected sliver should still be visible");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Interactive state: what is on screen, what is selected, and what a key does.
 
-use std::collections::HashSet;
+use std::cell::{Ref, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -123,6 +124,33 @@ impl Deleting {
     }
 }
 
+/// The sunburst for one directory: the tree the layout runs over, and the
+/// table taking a path back to the wedge id standing for it.
+pub struct RadialCache {
+    key: RadialKey,
+    pub root: RadialNode,
+    ids: HashMap<PathBuf, usize>,
+}
+
+impl RadialCache {
+    /// The wedge drawn for `path`, if it is one of the ones drawn at all.
+    pub fn id_of(&self, path: &Path) -> Option<usize> {
+        self.ids.get(path).copied()
+    }
+}
+
+/// Everything the sunburst is built out of. While none of it has moved, the
+/// cached sunburst is still the right one.
+#[derive(Clone, PartialEq, Eq)]
+struct RadialKey {
+    cwd: PathBuf,
+    rings: usize,
+    size_kind: SizeKind,
+    metric: Metric,
+    /// Bumped whenever the scanned tree itself changes under the view.
+    revision: u64,
+}
+
 /// A scan running on another thread.
 struct Session {
     progress: Arc<Progress>,
@@ -172,6 +200,10 @@ pub struct App {
     tick: usize,
     session: Option<Session>,
     mode: ScanMode,
+    /// How many times the tree behind the view has been replaced or edited.
+    revision: u64,
+    /// The last sunburst built, kept for as long as it stands.
+    radial: RefCell<Option<RadialCache>>,
 }
 
 impl App {
@@ -207,6 +239,8 @@ impl App {
             tick: 0,
             session: None,
             mode: ScanMode::Fresh,
+            revision: 0,
+            radial: RefCell::new(None),
         }
     }
 
@@ -242,6 +276,7 @@ impl App {
     fn begin(&mut self, path: &Path, mode: ScanMode) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.mode = mode;
+        self.touch();
 
         if mode == ScanMode::Fresh {
             self.filesystem = disko_core::mounts::for_path(&path);
@@ -407,6 +442,7 @@ impl App {
         }
 
         self.tree = Some(tree);
+        self.touch();
         // Whatever is on screen is now the real thing.
         self.provisional = None;
         self.streamed.clear();
@@ -692,6 +728,7 @@ impl App {
                     tree.remove(path);
                 }
             }
+            self.touch();
         }
 
         let freed = deletion::freed(&outcomes);
@@ -732,6 +769,7 @@ impl App {
         self.view = View::Picker;
         self.tree = None;
         self.diff = None;
+        self.touch();
         self.metric = Metric::Size;
         self.root = PathBuf::new();
         self.cwd = PathBuf::new();
@@ -766,6 +804,24 @@ impl App {
             }
             Err(error) => self.status = Some(error),
         }
+    }
+
+    /// Put the path under the cursor on the clipboard — the way out of disko
+    /// and into whatever you actually meant to do with the folder you found.
+    pub fn copy_selected_path(&mut self) {
+        // A group row stands for no single path, and an empty directory has no
+        // row at all; the directory being looked at is the honest answer to
+        // both.
+        let path = self
+            .selected_row()
+            .and_then(|row| row.path)
+            .unwrap_or_else(|| self.cwd.clone());
+
+        // The clipboard gets the real path, the message gets the short one.
+        self.status = Some(match crate::clipboard::copy(&path.to_string_lossy()) {
+            Ok(()) => format!("copied {}", model::display_path(&path)),
+            Err(error) => error,
+        });
     }
 
     pub fn toggle_mark(&mut self) {
@@ -854,27 +910,67 @@ impl App {
         parts.join(" › ")
     }
 
-    /// The sunburst for the current directory, plus the table mapping each
-    /// wedge id back to the path it came from.
-    pub fn radial_tree(&self, rings: usize) -> (RadialNode, Vec<PathBuf>) {
-        let mut ids = Vec::new();
+    /// The sunburst for the current directory, plus the table taking a path
+    /// back to the wedge that stands for it.
+    ///
+    /// Building it walks `rings` levels of the tree and clones a path per node,
+    /// which is far too much to redo for every keystroke — so the last one is
+    /// kept until something it was built from moves.
+    pub fn radial_tree(&self, rings: usize) -> Ref<'_, RadialCache> {
+        let key = RadialKey {
+            cwd: self.cwd.clone(),
+            rings,
+            size_kind: self.settings.size_kind,
+            metric: self.metric,
+            revision: self.revision,
+        };
 
-        if self.showing_growth() {
-            let node = match self.current_change() {
-                Some(change) => {
-                    let scale = biggest_change(change);
-                    build_growth_radial(change, rings, scale, &mut ids)
-                }
-                None => RadialNode::leaf(0, "", 0),
-            };
-            return (node, ids);
+        let stale = match &*self.radial.borrow() {
+            Some(cache) => cache.key != key,
+            None => true,
+        };
+        if stale {
+            *self.radial.borrow_mut() = Some(self.build_radial(key));
         }
 
-        let node = match self.current_entry() {
-            Some(entry) => build_radial(entry, self.settings.size_kind, rings, &mut ids),
-            None => RadialNode::leaf(0, "", 0),
+        Ref::map(self.radial.borrow(), |cache| {
+            cache.as_ref().expect("the cache was just filled")
+        })
+    }
+
+    fn build_radial(&self, key: RadialKey) -> RadialCache {
+        let mut ids = Vec::new();
+
+        let root = if self.showing_growth() {
+            match self.current_change() {
+                Some(change) => {
+                    let scale = biggest_change(change);
+                    build_growth_radial(change, key.rings, scale, &mut ids)
+                }
+                None => RadialNode::leaf(0, "", 0),
+            }
+        } else {
+            match self.current_entry() {
+                Some(entry) => build_radial(entry, key.size_kind, key.rings, &mut ids),
+                None => RadialNode::leaf(0, "", 0),
+            }
         };
-        (node, ids)
+
+        RadialCache {
+            key,
+            root,
+            ids: ids
+                .into_iter()
+                .enumerate()
+                .map(|(id, path)| (path, id))
+                .collect(),
+        }
+    }
+
+    /// Note that the tree behind the view has changed, so anything derived
+    /// from it has to be built again.
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn pick_selected_filesystem(&mut self) {
@@ -1096,22 +1192,49 @@ mod tests {
     #[test]
     fn the_radial_tree_ids_map_back_to_paths() {
         let app = app_with_tree();
-        let (node, ids) = app.radial_tree(2);
+        let cache = app.radial_tree(2);
 
-        assert_eq!(node.size, 1000);
-        assert_eq!(ids[0], PathBuf::from("/root"));
+        assert_eq!(cache.root.size, 1000);
         // Largest first, depth first.
-        assert_eq!(ids[1], PathBuf::from("/root/big"));
-        assert_eq!(ids[2], PathBuf::from("/root/big/inner"));
-        assert_eq!(ids[3], PathBuf::from("/root/small"));
-        assert_eq!(node.children[0].children[0].id, 2);
+        for (id, path) in [
+            (0, "/root"),
+            (1, "/root/big"),
+            (2, "/root/big/inner"),
+            (3, "/root/small"),
+        ] {
+            assert_eq!(cache.id_of(Path::new(path)), Some(id), "{path}");
+        }
+        assert_eq!(cache.root.children[0].children[0].id, 2);
     }
 
     #[test]
     fn the_radial_tree_stops_at_the_ring_limit() {
         let app = app_with_tree();
-        let (node, _) = app.radial_tree(1);
-        assert!(node.children[0].children.is_empty());
+        let cache = app.radial_tree(1);
+        assert!(cache.root.children[0].children.is_empty());
+    }
+
+    /// Rebuilding the sunburst for every keystroke is what made holding an
+    /// arrow key down drag, so the same directory has to hand back the same
+    /// build — and a changed one must not.
+    #[test]
+    fn the_radial_tree_is_only_rebuilt_when_something_moves() {
+        let mut app = app_with_tree();
+        let first = app.radial_tree(2).root.size;
+        assert_eq!(first, 1000);
+        assert_eq!(app.revision, 0, "reading it should change nothing");
+
+        // Moving the cursor leaves the chart alone...
+        app.move_selection(1);
+        assert_eq!(app.revision, 0);
+
+        // ...but editing the tree does not.
+        app.apply_outcomes(vec![Outcome::Deleted {
+            path: PathBuf::from("/root/small"),
+            size: 300,
+        }]);
+        assert_eq!(app.revision, 1);
+        assert_eq!(app.radial_tree(2).id_of(Path::new("/root/small")), None);
     }
 
     #[test]

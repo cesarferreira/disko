@@ -218,6 +218,101 @@ fn the_explorer_draws_a_sunburst_with_a_legend() {
     assert!(screen.contains("404 GB"), "{screen}");
 }
 
+/// The reported bug: past the biggest few entries the chart stopped
+/// responding, because every remaining wedge was thinner than a pixel and the
+/// highlight had nothing to paint. Two different small rows must not draw the
+/// same chart.
+#[test]
+fn selecting_a_small_entry_still_moves_the_highlight() {
+    // Only the chart: the legend on the right always moves its own cursor, so
+    // comparing whole screens would pass even with a dead chart.
+    let chart_for = |selection: usize| {
+        let mut app = app();
+        app.view = View::Explorer;
+        app.selection = selection;
+        let row = app.selected_row().unwrap();
+        // Small enough that the wedge is sub-pixel: this is the case that broke.
+        assert!(row.fraction < 0.02, "{} is not a small row", row.name);
+
+        let buffer = disko::tui::render(&mut app, 100, 30).unwrap();
+        (0..30)
+            .flat_map(|y| (0..60).map(move |x| (x, y)))
+            .map(|(x, y)| format!("{:?}", buffer.cell((x, y)).unwrap()))
+            .collect::<Vec<_>>()
+    };
+
+    assert_ne!(
+        chart_for(4),
+        chart_for(5),
+        "the highlight did not move between two small entries"
+    );
+}
+
+/// The same bug at the scale it was reported: a real `~/Library` is a handful
+/// of huge entries and a long tail of tiny ones, and *every* row has to light
+/// something up, not just the ones big enough to see.
+#[test]
+fn every_row_of_a_long_tail_lights_up_its_own_wedge() {
+    const MB: u64 = 1_000_000;
+    const KB: u64 = 1_000;
+
+    let sizes = [
+        58 * GB,
+        49 * GB,
+        14 * GB,
+        12 * GB,
+        10 * GB,
+        8 * GB,
+        4 * GB,
+        736 * MB,
+        551 * MB,
+        157 * MB,
+        122 * MB,
+        100 * MB,
+        47 * MB,
+        10 * MB,
+        3 * MB,
+        696 * KB,
+        213 * KB,
+        57 * KB,
+        25 * KB,
+    ];
+    let library = dir(
+        "/Library",
+        sizes.iter().sum(),
+        sizes
+            .iter()
+            .enumerate()
+            .map(|(index, size)| dir(&format!("/Library/entry{index:02}"), *size, vec![]))
+            .collect(),
+    );
+
+    let chart_for = |selection: usize| {
+        let mut app = app();
+        app.tree = Some(library.clone());
+        app.root = PathBuf::from("/Library");
+        app.cwd = PathBuf::from("/Library");
+        app.view = View::Explorer;
+        app.selection = selection;
+
+        let buffer = disko::tui::render(&mut app, 100, 30).unwrap();
+        // The chart only: the legend moves its own cursor regardless.
+        (0..30)
+            .flat_map(|y| (0..60).map(move |x| (x, y)))
+            .map(|(x, y)| format!("{:?}", buffer.cell((x, y)).unwrap()))
+            .collect::<Vec<_>>()
+    };
+
+    for selection in 1..sizes.len() {
+        assert_ne!(
+            chart_for(selection - 1),
+            chart_for(selection),
+            "rows {} and {selection} draw the same chart",
+            selection - 1
+        );
+    }
+}
+
 #[test]
 fn drilling_down_moves_the_breadcrumb_and_the_chart() {
     let mut app = app();
@@ -979,6 +1074,37 @@ fn hints_are_dropped_from_the_least_important_end() {
     assert!(narrow.contains("Enter explore"), "{narrow}");
     assert!(wide.contains("d details"), "{wide}");
     assert!(!narrow.contains("d details"), "{narrow}");
+}
+
+#[test]
+fn copying_reports_the_path_it_put_on_the_clipboard() {
+    let mut app = app();
+    app.selection = 1;
+    let expected = app.selected_row().unwrap().path.unwrap();
+
+    press(&mut app, KeyCode::Char('y'));
+
+    let status = app.status.clone().unwrap();
+    assert!(status.starts_with("copied"), "{status}");
+    assert!(
+        status.ends_with(&expected.display().to_string()),
+        "{status}"
+    );
+}
+
+/// A group row stands for several paths, so there is no single one to copy —
+/// the directory being looked at is the useful answer instead of a complaint.
+#[test]
+fn copying_a_group_row_falls_back_to_the_directory() {
+    let mut app = app();
+    app.settings.top = 1;
+    app.selection = 1;
+    assert!(app.selected_row().unwrap().is_other());
+
+    press(&mut app, KeyCode::Char('c'));
+
+    let status = app.status.clone().unwrap();
+    assert_eq!(status, "copied /", "{status}");
 }
 
 #[test]

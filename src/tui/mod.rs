@@ -78,10 +78,19 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
         app.advance();
         terminal.draw(|frame| draw(frame, app, &mut ui, tick))?;
 
+        // A held-down arrow key repeats faster than a frame of a large
+        // directory takes to draw. Taking the whole queue rather than one key
+        // per frame keeps the cursor level with the keyboard, instead of
+        // building a backlog that carries on scrolling after the key is up.
         if event::poll(FRAME)? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
-                _ => {}
+            loop {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
+                    _ => {}
+                }
+                if app.quit || !event::poll(Duration::ZERO)? {
+                    break;
+                }
             }
         }
 
@@ -286,6 +295,7 @@ fn handle_browsing(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') => app.toggle_size_kind(),
         KeyCode::Char('t') => app.toggle_metric(),
         KeyCode::Char('o') => app.reveal_selected(),
+        KeyCode::Char('y') | KeyCode::Char('c') => app.copy_selected_path(),
         KeyCode::Char(' ') => app.toggle_mark(),
         KeyCode::Char('x') | KeyCode::Delete => app.request_delete(),
         KeyCode::Char('r') => app.rescan(),

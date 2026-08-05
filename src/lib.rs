@@ -5,6 +5,7 @@
 //! that decides what a person sees.
 
 pub mod cli;
+pub mod clipboard;
 pub mod commands;
 pub mod deletion;
 pub mod model;
