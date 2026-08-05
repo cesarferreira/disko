@@ -294,11 +294,18 @@ impl Highlight {
         })
     }
 
+    /// Whether a pixel is inside the highlighted slice.
+    ///
+    /// The slice runs outward: the selected wedge's arc *and* everything drawn
+    /// beyond it in the same arc, which is what it contains. Lighting only the
+    /// one ring leaves the rest of the slice dimmed, and the chart then looks
+    /// like it is ignoring most of the cursor's moves.
+    ///
     /// Turns wrap at twelve o'clock, so the distance between two of them is
     /// whichever way round the circle is shorter.
     fn covers(&self, depth: usize, turn: f64) -> bool {
         let gap = (turn - self.middle).abs();
-        depth == self.depth && gap.min(1.0 - gap) <= self.half_span
+        depth >= self.depth && gap.min(1.0 - gap) <= self.half_span
     }
 }
 
@@ -341,12 +348,17 @@ pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions
             }
 
             let turn = turn_of(dx, dy);
+            let inside = highlight
+                .as_ref()
+                .is_some_and(|highlight| highlight.covers(depth, turn));
 
-            // The highlight is painted straight over the ring, dividers and
-            // all: a wedge widened to three pixels has nothing left to spare
-            // for a gap on either side of it.
+            // The selected wedge's own ring is painted straight over the
+            // dividers: one widened to three pixels has nothing to spare for a
+            // gap either side of it. Its contents, further out, keep their
+            // dividers — that structure is the point of drawing them.
             if let Some(highlight) = &highlight
-                && highlight.covers(depth, turn)
+                && inside
+                && depth == highlight.depth
             {
                 canvas.set(x, y, highlight.color);
                 continue;
@@ -366,18 +378,22 @@ pub fn render(segments: &[Segment], canvas: &mut Canvas, options: &RenderOptions
                 continue;
             }
 
-            canvas.set(x, y, shade_for(segment, options));
+            canvas.set(x, y, shade_for(segment, inside, options));
         }
     }
 
     drawn
 }
 
-fn shade_for(segment: &Segment, options: &RenderOptions) -> Rgb {
+/// Deeper rings are already lighter shades of their parent, so brightening them
+/// again would wash them into each other. Inside the slice they keep their true
+/// colour, and the contrast comes from everything else stepping back.
+fn shade_for(segment: &Segment, inside_the_slice: bool, options: &RenderOptions) -> Rgb {
     match options.selected {
-        Some(id) if id == segment.id => palette::shade(segment.color, SELECTED_SHADE),
-        Some(_) => palette::shade(segment.color, DIMMED_SHADE),
         None => segment.color,
+        Some(id) if id == segment.id => palette::shade(segment.color, SELECTED_SHADE),
+        Some(_) if inside_the_slice => segment.color,
+        Some(_) => palette::shade(segment.color, DIMMED_SHADE),
     }
 }
 
@@ -669,10 +685,72 @@ mod tests {
             ..Default::default()
         };
 
-        let selected = shade_for(&segments[0], &options);
-        let other = shade_for(&segments[1], &options);
+        let selected = shade_for(&segments[0], true, &options);
+        let other = shade_for(&segments[1], false, &options);
         assert_ne!(selected, segments[0].color);
         assert!(other.r < segments[1].color.r.max(1));
+
+        // What a selected wedge contains is part of the same slice: dimming it
+        // would leave the cursor lighting up one band out of three.
+        let contained = Segment {
+            id: 99,
+            depth: 2,
+            ..segments[0].clone()
+        };
+        assert_eq!(shade_for(&contained, true, &options), contained.color);
+        assert_ne!(shade_for(&contained, false, &options), contained.color);
+    }
+
+    /// What the legend's cursor picks out is a slice of the cheese, not one arc
+    /// of it: the wedge and everything drawn beyond it in the same arc.
+    #[test]
+    fn the_selected_slice_lights_up_all_the_way_out() {
+        let root = node(
+            0,
+            100,
+            vec![
+                node(1, 50, vec![node(2, 50, vec![node(3, 50, vec![])])]),
+                node(4, 50, vec![node(5, 50, vec![])]),
+            ],
+        );
+        let segments = layout(&root, &LayoutOptions::default());
+        let mut canvas = Canvas::new(60, 30);
+        render(
+            &segments,
+            &mut canvas,
+            &RenderOptions {
+                selected: Some(1),
+                ..Default::default()
+            },
+        );
+
+        // Every ring inside the selected arc keeps a true colour; the arc next
+        // to it is dimmed at every ring.
+        for depth in 1..=3 {
+            let segment = segments.iter().find(|s| s.depth == depth).unwrap();
+            let lit = painted_with(&canvas, segment.color) > 0
+                || painted_with(&canvas, palette::shade(segment.color, SELECTED_SHADE)) > 0;
+            assert!(lit, "ring {depth} of the selected slice stayed dark");
+        }
+        for id in [4, 5] {
+            let segment = segments.iter().find(|s| s.id == id).unwrap();
+            assert_eq!(
+                painted_with(&canvas, segment.color),
+                0,
+                "wedge {id} is outside the slice and should be dimmed"
+            );
+            assert!(
+                painted_with(&canvas, palette::shade(segment.color, DIMMED_SHADE)) > 0,
+                "wedge {id} should still be drawn, just dimmed"
+            );
+        }
+    }
+
+    fn painted_with(canvas: &Canvas, color: Rgb) -> usize {
+        (0..canvas.height())
+            .flat_map(|y| (0..canvas.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| canvas.get(x, y) == Some(color))
+            .count()
     }
 
     #[test]
