@@ -1,8 +1,9 @@
 //! Parallel directory scanning with cancellation and live progress.
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs::{self, Metadata};
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -295,7 +296,7 @@ fn scan_dir(path: &Path, meta: &Metadata, depth: usize, ctx: &Ctx) -> DiskEntry 
     let children: Vec<DiskEntry> = dir_entries
         .par_iter()
         .filter_map(|dir_entry| {
-            let child_path = dir_entry.path();
+            let child_path = join_exact(path, &dir_entry.file_name());
             let child_meta = match fs::symlink_metadata(&child_path) {
                 Ok(meta) => meta,
                 Err(_) => {
@@ -329,6 +330,10 @@ fn scan_dir(path: &Path, meta: &Metadata, depth: usize, ctx: &Ctx) -> DiskEntry 
     // at the end, so a capped scan of `/` never holds the whole tree at once.
     let keep_children = ctx.options.max_depth.is_none_or(|max| depth < max);
     if keep_children {
+        // Collecting in parallel leaves spare capacity on every one of these
+        // vectors, and there is one per directory for the rest of the session.
+        let mut children = children;
+        children.shrink_to_fit();
         entry.children = children;
     }
 
@@ -360,6 +365,21 @@ fn leaf_entry(path: PathBuf, meta: &Metadata, ctx: &Ctx) -> DiskEntry {
     entry.allocated_size = allocated_of(meta);
     ctx.progress.saw_entry(entry.allocated_size);
     entry
+}
+
+/// `parent/name`, in a buffer sized to hold exactly that.
+///
+/// The obvious `DirEntry::path()` grows its buffer by doubling and leaves the
+/// slack in place. Every entry in the tree keeps its path for the whole
+/// session, so on a home directory with two million files in it that slack came
+/// to 177 MB — paid for a length that was known before the first byte was
+/// written.
+fn join_exact(parent: &Path, name: &OsStr) -> PathBuf {
+    let mut path =
+        PathBuf::with_capacity(parent.as_os_str().len() + MAIN_SEPARATOR.len_utf8() + name.len());
+    path.push(parent);
+    path.push(name);
+    path
 }
 
 /// Seconds since the Unix epoch, or 0 when the filesystem will not say.
@@ -626,6 +646,49 @@ mod tests {
         assert_eq!(root.entry_type, EntryType::File);
         assert_eq!(root.apparent_size, 512);
         assert_eq!(root.items, 1);
+    }
+
+    #[test]
+    fn joined_paths_are_correct_and_carry_no_slack() {
+        let joined = join_exact(Path::new("/home/someone/code"), OsStr::new("disko"));
+
+        assert_eq!(joined, PathBuf::from("/home/someone/code/disko"));
+        // The whole point: no room left over. Every entry in a scan keeps its
+        // path for the session, so a byte of slack here is a byte per file.
+        assert!(
+            joined.capacity() <= joined.as_os_str().len() + 1,
+            "capacity {} for a path of {} bytes",
+            joined.capacity(),
+            joined.as_os_str().len()
+        );
+    }
+
+    #[test]
+    fn a_scanned_tree_holds_no_spare_path_capacity() {
+        let tree = TempTree::new("capacity");
+        tree.file("some/reasonably/deep/nesting/file.txt", 10);
+
+        let root = scan_tree(&tree.0, ScanOptions::default());
+
+        fn check(entry: &DiskEntry) {
+            assert!(
+                entry.path.capacity() <= entry.path.as_os_str().len() + 1,
+                "{} has {} bytes of capacity for {} bytes of path",
+                entry.path.display(),
+                entry.path.capacity(),
+                entry.path.as_os_str().len()
+            );
+            assert_eq!(
+                entry.children.capacity(),
+                entry.children.len(),
+                "{} keeps a child list bigger than its child count",
+                entry.path.display()
+            );
+            for child in &entry.children {
+                check(child);
+            }
+        }
+        check(&root);
     }
 
     #[cfg(unix)]

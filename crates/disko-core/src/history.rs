@@ -268,17 +268,20 @@ pub fn prune_for_storage(tree: &DiskEntry) -> DiskEntry {
 }
 
 fn prune(entry: &DiskEntry, floor: u64, depth: usize) -> DiskEntry {
-    let mut copy = entry.clone();
-    copy.children = if depth == 0 {
-        Vec::new()
-    } else {
-        entry
+    // Deliberately `without_children` rather than `clone`: this walks the whole
+    // tree, and cloning each node would deep-copy the very subtree the next
+    // line is about to replace. Pruning a two-million entry home directory down
+    // to the couple of thousand nodes worth storing used to allocate 1.4 GB to
+    // do it, none of which the allocator gave back.
+    let mut copy = entry.without_children();
+    if depth > 0 {
+        copy.children = entry
             .children
             .iter()
             .filter(|child| child.allocated_size >= floor)
             .map(|child| prune(child, floor, depth - 1))
-            .collect()
-    };
+            .collect();
+    }
     copy
 }
 

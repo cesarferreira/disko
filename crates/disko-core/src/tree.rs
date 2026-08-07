@@ -88,6 +88,25 @@ impl DiskEntry {
         }
     }
 
+    /// This entry's own figures, with an empty child list.
+    ///
+    /// Anything building a reduced copy of a tree wants this rather than
+    /// `clone()`: cloning deep-copies every descendant, so a caller that only
+    /// means to keep a couple of levels still pays for the whole subtree first
+    /// and then throws it away.
+    pub fn without_children(&self) -> DiskEntry {
+        DiskEntry {
+            path: self.path.clone(),
+            apparent_size: self.apparent_size,
+            allocated_size: self.allocated_size,
+            entry_type: self.entry_type,
+            items: self.items,
+            modified: self.modified,
+            children: Vec::new(),
+            scan_state: self.scan_state,
+        }
+    }
+
     pub fn size(&self, kind: SizeKind) -> u64 {
         match kind {
             SizeKind::Allocated => self.allocated_size,
@@ -297,6 +316,19 @@ mod tests {
             root.allocated_size, 100,
             "nothing should have been subtracted"
         );
+    }
+
+    #[test]
+    fn a_copy_without_children_keeps_every_figure() {
+        let root = tree();
+        let bare = root.child("a").unwrap().without_children();
+
+        assert_eq!(bare.path, PathBuf::from("/root/a"));
+        assert_eq!(bare.allocated_size, 70);
+        assert_eq!(bare.apparent_size, 70);
+        assert_eq!(bare.entry_type, EntryType::Directory);
+        // The subtree is what is left behind, and only the subtree.
+        assert!(bare.children.is_empty());
     }
 
     #[test]

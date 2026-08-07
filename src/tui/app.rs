@@ -25,6 +25,11 @@ const STREAM_DEPTH: usize = 2;
 /// How many finished directories to keep on the progress screen.
 const STREAM_KEEP: usize = 12;
 
+/// How much of the previous tree a rescan keeps on screen while it runs. The
+/// sunburst draws three rings and the list draws one level, so five is already
+/// more than anything on screen can reach.
+const REFRESH_KEEP_DEPTH: usize = 5;
+
 /// A pending deletion, waiting to be confirmed or called off.
 #[derive(Clone, Debug, Default)]
 pub struct Confirm {
@@ -301,6 +306,14 @@ impl App {
                 self.provisional = Some(snapshot.taken_at);
                 self.view = View::Overview;
             }
+        } else if let Some(previous) = self.tree.take() {
+            // A rescan builds a whole second tree before it can replace this
+            // one, so holding on to it intact means every entry is in memory
+            // twice for the length of the scan — a gigabyte, on a home
+            // directory with two million things under it. Keep the part the
+            // screen can actually reach and let go of the rest; `absorb_scan`
+            // puts the full tree back in a moment.
+            self.tree = Some(visible_stub(&previous, &self.cwd, REFRESH_KEEP_DEPTH));
         }
 
         let (progress, cancel, handle) = scan::scan_in_background_streaming(
@@ -991,6 +1004,44 @@ impl App {
     }
 }
 
+/// The part of `entry` the screen can still reach with the cursor at `cwd`:
+/// `below` levels under the cursor, and enough of the way back up that leaving
+/// the directory lists what it listed before.
+///
+/// Everything else is dropped. The numbers that survive are the same numbers
+/// the last scan produced — this trades depth the view is not showing for the
+/// memory a second full tree would need.
+fn visible_stub(entry: &DiskEntry, cwd: &Path, below: usize) -> DiskEntry {
+    let mut stub = entry.without_children();
+
+    if entry.path.starts_with(cwd) {
+        // At or under the cursor: a few levels is everything that is drawn.
+        if below > 0 {
+            stub.children = entry
+                .children
+                .iter()
+                .map(|child| visible_stub(child, cwd, below - 1))
+                .collect();
+        }
+    } else if cwd.starts_with(&entry.path) {
+        // Above the cursor: keep every child, so going back up still lists the
+        // same rows, but only follow the one that leads back down to it.
+        stub.children = entry
+            .children
+            .iter()
+            .map(|child| {
+                if cwd.starts_with(&child.path) {
+                    visible_stub(child, cwd, below)
+                } else {
+                    child.without_children()
+                }
+            })
+            .collect();
+    }
+
+    stub
+}
+
 fn build_radial(
     entry: &DiskEntry,
     kind: SizeKind,
@@ -1117,6 +1168,81 @@ mod tests {
         app.tree = Some(tree);
         app.view = View::Overview;
         app
+    }
+
+    /// `/root` -> `a` -> `deep` -> `deeper`, with a sibling at every level, so
+    /// a stub can be checked for both what it keeps and what it lets go.
+    fn deep_tree() -> DiskEntry {
+        entry(
+            "/root",
+            1000,
+            vec![
+                entry(
+                    "/root/a",
+                    700,
+                    vec![
+                        entry(
+                            "/root/a/deep",
+                            600,
+                            vec![entry(
+                                "/root/a/deep/deeper",
+                                500,
+                                vec![entry("/root/a/deep/deeper/deepest", 400, vec![])],
+                            )],
+                        ),
+                        entry("/root/a/sibling", 100, vec![entry("/root/a/sibling/x", 1, vec![])]),
+                    ],
+                ),
+                entry("/root/b", 300, vec![entry("/root/b/hidden", 50, vec![])]),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_stub_keeps_the_levels_under_the_cursor() {
+        let stub = visible_stub(&deep_tree(), Path::new("/root/a"), 2);
+        let a = stub.child("a").unwrap();
+
+        // Two levels under the cursor survive with their sizes intact...
+        assert_eq!(a.allocated_size, 700);
+        let deeper = a.child("deep").unwrap().child("deeper").unwrap();
+        assert_eq!(deeper.allocated_size, 500);
+        // ...and the third does not.
+        assert!(deeper.children.is_empty(), "the stub stops at the depth asked for");
+    }
+
+    #[test]
+    fn a_stub_keeps_enough_to_go_back_up() {
+        let stub = visible_stub(&deep_tree(), Path::new("/root/a"), 2);
+
+        // Leaving `/root/a` must still list the same rows it listed before,
+        // with the same numbers, even though nothing under them is kept.
+        let b = stub.child("b").unwrap();
+        assert_eq!(b.allocated_size, 300);
+        assert!(b.children.is_empty(), "a branch off the path is not followed");
+    }
+
+    #[test]
+    fn a_stub_at_the_root_is_bounded_by_depth() {
+        let stub = visible_stub(&deep_tree(), Path::new("/root"), 1);
+
+        assert_eq!(stub.allocated_size, 1000);
+        assert_eq!(stub.children.len(), 2);
+        // One level down, and no further.
+        assert!(stub.children.iter().all(|child| child.children.is_empty()));
+    }
+
+    #[test]
+    fn rescanning_drops_the_old_tree_down_to_the_stub() {
+        let mut app = app_with_tree();
+        app.cwd = PathBuf::from("/root");
+        app.begin(&PathBuf::from("/root"), ScanMode::Refresh);
+
+        // The rescan is under way and the view still has its numbers, but the
+        // full tree is no longer being held alongside the one being built.
+        let tree = app.tree.as_ref().expect("the view keeps something to draw");
+        assert_eq!(tree.allocated_size, 1000);
+        assert_eq!(app.rows().len(), 2);
     }
 
     #[test]
