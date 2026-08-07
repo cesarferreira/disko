@@ -1,9 +1,9 @@
 //! The radial explorer: a sunburst of the current directory, with a legend
 //! tying every wedge to a name and a size.
 
-use disko_core::size::format;
+use disko_core::size::{Unit, format};
 use disko_render::radial::{self, Drawn, LayoutOptions, RenderOptions, Segment};
-use disko_render::{BrailleCanvas, Canvas, palette};
+use disko_render::{BrailleCanvas, Canvas, Rgb, palette};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -13,7 +13,7 @@ use ratatui::widgets::Paragraph;
 use crate::model::Row;
 use crate::report::signed;
 use crate::tui::app::App;
-use crate::tui::text::{fit, width};
+use crate::tui::text::{fit, truncate, width};
 use crate::tui::theme;
 
 /// Three rings is the sweet spot: enough to see structure two levels down,
@@ -26,7 +26,8 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // breadcrumb
         Constraint::Length(1),
-        Constraint::Min(6), // chart and legend
+        Constraint::Min(6),    // chart and legend
+        Constraint::Length(1), // the selected name, in full
         Constraint::Length(1),
     ])
     .horizontal_margin(1)
@@ -41,6 +42,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     if legend_width > 0 {
         draw_legend(frame, body[1], app, &rows);
     }
+    draw_selection(frame, chunks[3], app, &rows);
 
     // The breadcrumb comes after the chart because what the chart could draw
     // decides what this line has to admit.
@@ -57,7 +59,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     }
     frame.render_widget(Paragraph::new(Line::from(crumbs)), chunks[0]);
 
-    crate::tui::footer::draw(frame, chunks[3], app, None);
+    crate::tui::footer::draw(frame, chunks[4], app, None);
 }
 
 /// What the chart could not say for itself.
@@ -203,6 +205,37 @@ fn draw_hole(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// The legend column is too narrow for most file names, so the selected one is
+/// repeated here in full across the whole width — otherwise the only way to
+/// read a name is to open the folder it is in.
+fn draw_selection(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
+    let Some(row) = rows.get(app.selection) else {
+        return;
+    };
+    let total = area.width as usize;
+    if total < 8 {
+        return;
+    }
+
+    let growth = app.showing_growth();
+    let size = amount(row, growth, app.settings.unit);
+    // The swatch ties this line to the wedge and the legend row it repeats.
+    let name = truncate(&row.name, total.saturating_sub(width(&size) + 5));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "■ ",
+                Style::default().fg(theme::color(color_of(row, growth, scale(rows)))),
+            ),
+            Span::styled(name, theme::heading()),
+            Span::raw("   "),
+            Span::styled(size, theme::secondary()),
+        ])),
+        area,
+    );
+}
+
 fn draw_legend(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
     let unit = app.settings.unit;
     let capacity = area.height as usize;
@@ -215,19 +248,8 @@ fn draw_legend(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
     let visible = rows.iter().skip(offset).take(capacity);
 
     let growth = app.showing_growth();
-    let scale = rows
-        .iter()
-        .map(|row| row.delta.unwrap_or(0).abs())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let amount = |row: &Row| -> String {
-        if growth {
-            signed(row.delta.unwrap_or(0), unit)
-        } else {
-            format(row.size, unit)
-        }
-    };
+    let scale = scale(rows);
+    let amount = |row: &Row| amount(row, growth, unit);
 
     let size_width = rows
         .iter()
@@ -239,11 +261,7 @@ fn draw_legend(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
     let lines: Vec<Line> = visible
         .enumerate()
         .map(|(index, row)| {
-            let color = if growth {
-                palette::growth_color(row.delta.unwrap_or(0), scale)
-            } else {
-                palette::categorical(row.color_index)
-            };
+            let color = color_of(row, growth, scale);
             let is_selected = offset + index == app.selection;
             let marked = row
                 .path
@@ -267,4 +285,30 @@ fn draw_legend(frame: &mut Frame, area: Rect, app: &App, rows: &[Row]) {
         .collect();
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// What a row is being drawn by: its size, or its change when growth is on.
+fn amount(row: &Row, growth: bool, unit: Unit) -> String {
+    if growth {
+        signed(row.delta.unwrap_or(0), unit)
+    } else {
+        format(row.size, unit)
+    }
+}
+
+/// The biggest change on screen, which the growth colours are relative to.
+fn scale(rows: &[Row]) -> i64 {
+    rows.iter()
+        .map(|row| row.delta.unwrap_or(0).abs())
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn color_of(row: &Row, growth: bool, scale: i64) -> Rgb {
+    if growth {
+        palette::growth_color(row.delta.unwrap_or(0), scale)
+    } else {
+        palette::categorical(row.color_index)
+    }
 }

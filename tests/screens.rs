@@ -221,6 +221,45 @@ fn the_explorer_draws_a_sunburst_with_a_legend() {
     assert!(screen.contains("404 GB"), "{screen}");
 }
 
+/// A downloads folder is a column of sixty-character release names, and the
+/// legend can spare twenty. Whichever one is selected gets a full-width line
+/// of its own under the chart, or its name is simply unreadable.
+#[test]
+fn the_selected_name_is_repeated_in_full_under_the_chart() {
+    const LONG: &str = "Sonic.The.Hedgehog.2.2022.2160p.WEB-DL.DDP5.1.Atmos.HDR.HEVC-CMRG";
+
+    let screen_with_selection = |selection: usize| {
+        let mut app = app();
+        app.tree = Some(dir(
+            "/",
+            10 * GB,
+            vec![
+                dir(&format!("/{LONG}"), 6 * GB, vec![]),
+                dir("/Movies", 4 * GB, vec![]),
+            ],
+        ));
+        app.view = View::Explorer;
+        app.selection = selection;
+        joined(&render_lines(&mut app, 100, 30).unwrap())
+    };
+
+    let selected = screen_with_selection(0);
+    assert!(
+        selected.contains(LONG),
+        "the selected name is still cut off\n{selected}"
+    );
+    assert!(
+        selected.contains("6 GB"),
+        "and it says how big it is\n{selected}"
+    );
+
+    let elsewhere = screen_with_selection(1);
+    assert!(
+        !elsewhere.contains(LONG),
+        "the line follows the cursor\n{elsewhere}"
+    );
+}
+
 /// The reported bug: past the biggest few entries the chart stopped
 /// responding, because every remaining wedge was thinner than a pixel and the
 /// highlight had nothing to paint. Two different small rows must not draw the
