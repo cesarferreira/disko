@@ -27,12 +27,29 @@ clean:
 	cargo clean
 
 # Run tests
+#
+# nextest runs the whole workspace in one parallel pool instead of one test
+# binary after another, and names the slow ones on the way past. It does not
+# run doctests at all, so those still go through cargo — the two together cover
+# what `cargo test --workspace` covers on its own.
+#
+# It is not part of a default toolchain, so fall back rather than failing on a
+# machine that has not got it. Installing it takes minutes; `make test` is not
+# the place to spring that on anyone.
 test:
-	cargo test --workspace
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run --workspace && cargo test --workspace --doc; \
+	else \
+		echo "cargo-nextest not found; using cargo test. Install it with:"; \
+		echo "    cargo install cargo-nextest --locked"; \
+		cargo test --workspace; \
+	fi
 
-# Run clippy and check
+# Type-check and lint
+#
+# Clippy only: it runs the same front end `cargo check` does and adds its lints
+# on top, so checking first compiles everything twice to learn the same thing.
 check:
-	cargo check --workspace --all-targets
 	cargo clippy --workspace --all-targets -- -D warnings
 
 # Format code

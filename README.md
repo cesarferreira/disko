@@ -418,7 +418,7 @@ let tree = handle.join().unwrap()?;
 
 ```bash
 make            # check, build, test
-make test       # cargo test --workspace
+make test       # nextest + doctests, or cargo test if nextest is not installed
 make lint       # rustfmt + clippy -D warnings
 make install    # debug build into ~/.cargo/bin
 make release    # bump, changelog, tag, publish (LEVEL=patch|minor|major)
