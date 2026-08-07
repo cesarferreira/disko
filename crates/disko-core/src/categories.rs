@@ -407,21 +407,29 @@ pub fn find_reclaimable_from(
     home: Option<&Path>,
 ) -> Vec<Candidate> {
     let mut found = Vec::new();
-    walk(tree, kind, home, &mut found);
+    walk(tree.root_path(), tree, kind, home, &mut found);
     found.sort_by_key(|candidate| std::cmp::Reverse(candidate.size));
     found
 }
 
-fn walk(entry: &DiskEntry, kind: SizeKind, home: Option<&Path>, out: &mut Vec<Candidate>) {
+/// `path` is where the walk has got to; entries below the root do not carry
+/// one, so it is built on the way down.
+fn walk(
+    path: &Path,
+    entry: &DiskEntry,
+    kind: SizeKind,
+    home: Option<&Path>,
+    out: &mut Vec<Candidate>,
+) {
     if !entry.is_dir() {
         return;
     }
 
-    if let Some(rule) = RULES.iter().find(|rule| matches(rule, &entry.path, home)) {
+    if let Some(rule) = RULES.iter().find(|rule| matches(rule, path, home)) {
         // An empty cache is not worth mentioning.
         if entry.size(kind) > 0 {
             out.push(Candidate {
-                path: entry.path.clone(),
+                path: path.to_path_buf(),
                 size: entry.size(kind),
                 rule,
                 last_used: entry.modified,
@@ -431,7 +439,7 @@ fn walk(entry: &DiskEntry, kind: SizeKind, home: Option<&Path>, out: &mut Vec<Ca
     }
 
     for child in &entry.children {
-        walk(child, kind, home, out);
+        walk(&path.join(child.name_os()), child, kind, home, out);
     }
 }
 

@@ -112,7 +112,7 @@ impl Store {
 
     pub fn record_at(&self, tree: &DiskEntry, taken_at: u64) -> Result<Snapshot> {
         let snapshot = Snapshot {
-            root: tree.path.clone(),
+            root: tree.root_path().to_path_buf(),
             taken_at,
             total_allocated: tree.allocated_size,
             total_apparent: tree.apparent_size,
@@ -121,14 +121,14 @@ impl Store {
             tree: prune_for_storage(tree),
         };
 
-        let dir = self.dir_for(&tree.path);
+        let dir = self.dir_for(tree.root_path());
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
 
         let file = dir.join(format!("{taken_at}.json"));
         let json = serde_json::to_vec(&snapshot)?;
         fs::write(&file, json).with_context(|| format!("cannot write {}", file.display()))?;
 
-        self.prune(&tree.path)?;
+        self.prune(tree.root_path())?;
         Ok(snapshot)
     }
 

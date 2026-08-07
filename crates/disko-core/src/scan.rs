@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::{self, Metadata};
-use std::path::{Path, PathBuf, MAIN_SEPARATOR};
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -88,13 +88,13 @@ impl Progress {
         }
     }
 
-    fn publish(&self, depth: usize, entry: &DiskEntry) {
+    fn publish(&self, path: &Path, depth: usize, entry: &DiskEntry) {
         if depth == 0 || depth > self.stream_depth {
             return;
         }
         if let Ok(mut queue) = self.completed.lock() {
             queue.push(Finished {
-                path: entry.path.clone(),
+                path: path.to_path_buf(),
                 allocated: entry.allocated_size,
                 apparent: entry.apparent_size,
                 items: entry.items,
@@ -228,7 +228,7 @@ pub fn scan(
     let entry = if meta.is_dir() {
         scan_dir(&root, &meta, 0, &ctx)
     } else {
-        leaf_entry(root, &meta, &ctx)
+        leaf_entry(&root, 0, &meta, &ctx)
     };
 
     progress.finish();
@@ -267,8 +267,19 @@ pub fn scan_in_background_streaming(
     (progress, cancel, handle)
 }
 
+/// The root of a scan keeps the whole path it was given, since there is
+/// nothing above it to supply one. Everything below keeps only its own name and
+/// gets its path from the walk that reaches it.
+fn entry_at(path: &Path, depth: usize, entry_type: EntryType) -> DiskEntry {
+    if depth == 0 {
+        DiskEntry::new(path.as_os_str(), entry_type)
+    } else {
+        DiskEntry::new(path.file_name().unwrap_or(path.as_os_str()), entry_type)
+    }
+}
+
 fn scan_dir(path: &Path, meta: &Metadata, depth: usize, ctx: &Ctx) -> DiskEntry {
-    let mut entry = DiskEntry::new(path.to_path_buf(), EntryType::Directory);
+    let mut entry = entry_at(path, depth, EntryType::Directory);
     // A directory's own inode occupies blocks, which is why `du` on an empty
     // tree is not zero. Its `st_size` is bookkeeping rather than content, so
     // it stays out of the apparent total — the same split `du` makes between
@@ -306,13 +317,13 @@ fn scan_dir(path: &Path, meta: &Metadata, depth: usize, ctx: &Ctx) -> DiskEntry 
             };
 
             if !child_meta.is_dir() {
-                return Some(leaf_entry(child_path, &child_meta, ctx));
+                return Some(leaf_entry(&child_path, depth + 1, &child_meta, ctx));
             }
 
             let crosses_filesystem =
                 ctx.options.one_file_system && device_of(&child_meta) != ctx.root_device;
             if crosses_filesystem || ctx.is_remote_mount(&child_path) {
-                let mut skipped = DiskEntry::new(child_path, EntryType::Directory);
+                let mut skipped = entry_at(&child_path, depth + 1, EntryType::Directory);
                 skipped.modified = modified_of(&child_meta);
                 skipped.scan_state = ScanState::Skipped;
                 return Some(skipped);
@@ -337,11 +348,11 @@ fn scan_dir(path: &Path, meta: &Metadata, depth: usize, ctx: &Ctx) -> DiskEntry 
         entry.children = children;
     }
 
-    ctx.progress.publish(depth, &entry);
+    ctx.progress.publish(path, depth, &entry);
     entry
 }
 
-fn leaf_entry(path: PathBuf, meta: &Metadata, ctx: &Ctx) -> DiskEntry {
+fn leaf_entry(path: &Path, depth: usize, meta: &Metadata, ctx: &Ctx) -> DiskEntry {
     let file_type = meta.file_type();
     let entry_type = if file_type.is_symlink() {
         EntryType::Symlink
@@ -351,7 +362,7 @@ fn leaf_entry(path: PathBuf, meta: &Metadata, ctx: &Ctx) -> DiskEntry {
         EntryType::Other
     };
 
-    let mut entry = DiskEntry::new(path, entry_type);
+    let mut entry = entry_at(path, depth, entry_type);
     entry.modified = modified_of(meta);
 
     // A hard link seen a second time contributes nothing: the blocks were
@@ -370,10 +381,9 @@ fn leaf_entry(path: PathBuf, meta: &Metadata, ctx: &Ctx) -> DiskEntry {
 /// `parent/name`, in a buffer sized to hold exactly that.
 ///
 /// The obvious `DirEntry::path()` grows its buffer by doubling and leaves the
-/// slack in place. Every entry in the tree keeps its path for the whole
-/// session, so on a home directory with two million files in it that slack came
-/// to 177 MB — paid for a length that was known before the first byte was
-/// written.
+/// slack in place. These paths are transient now that entries keep only their
+/// names, but there is one per file scanned, and the length is known before the
+/// first byte is written.
 fn join_exact(parent: &Path, name: &OsStr) -> PathBuf {
     let mut path =
         PathBuf::with_capacity(parent.as_os_str().len() + MAIN_SEPARATOR.len_utf8() + name.len());
@@ -664,31 +674,41 @@ mod tests {
     }
 
     #[test]
-    fn a_scanned_tree_holds_no_spare_path_capacity() {
-        let tree = TempTree::new("capacity");
+    fn only_the_root_of_a_scan_keeps_a_whole_path() {
+        let tree = TempTree::new("names");
         tree.file("some/reasonably/deep/nesting/file.txt", 10);
 
         let root = scan_tree(&tree.0, ScanOptions::default());
+        assert_eq!(root.root_path(), tree.0.canonicalize().unwrap());
 
         fn check(entry: &DiskEntry) {
-            assert!(
-                entry.path.capacity() <= entry.path.as_os_str().len() + 1,
-                "{} has {} bytes of capacity for {} bytes of path",
-                entry.path.display(),
-                entry.path.capacity(),
-                entry.path.as_os_str().len()
-            );
-            assert_eq!(
-                entry.children.capacity(),
-                entry.children.len(),
-                "{} keeps a child list bigger than its child count",
-                entry.path.display()
-            );
             for child in &entry.children {
+                // The whole point: a child holds its own name and nothing of
+                // where it sits, so a directory's name is stored once rather
+                // than once per file beneath it.
+                assert!(
+                    !child.name_os().as_encoded_bytes().contains(&b'/'),
+                    "{:?} carries a path, not a name",
+                    child.name_os()
+                );
+                assert_eq!(
+                    child.children.capacity(),
+                    child.children.len(),
+                    "{:?} keeps a child list bigger than its child count",
+                    child.name_os()
+                );
                 check(child);
             }
         }
         check(&root);
+
+        // ...and paths still come back out of it intact.
+        let deep = tree.0.canonicalize().unwrap().join("some/reasonably/deep");
+        assert!(
+            root.resolve(&deep).is_some(),
+            "{} did not resolve",
+            deep.display()
+        );
     }
 
     #[cfg(unix)]

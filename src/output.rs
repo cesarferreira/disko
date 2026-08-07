@@ -44,11 +44,11 @@ pub fn scan_plain(
     options: &RowOptions,
     unit: Unit,
 ) -> Result<()> {
-    let rows = model::rows(root, options);
+    let rows = model::rows(root.root_path(), root, options);
     for row in &rows {
         let path = match &row.path {
             Some(path) => path.display().to_string(),
-            None => format!("{} (other)", root.path.display()),
+            None => format!("{} (other)", root.root_path().display()),
         };
         writeln!(
             out,

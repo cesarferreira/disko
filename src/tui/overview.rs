@@ -141,7 +141,7 @@ fn draw_current_folder(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = vec![
         Span::styled("Current folder: ", theme::muted()),
-        Span::raw(model::display_path(&entry.path)),
+        Span::raw(model::display_path(&app.cwd)),
         Span::raw("    "),
         Span::styled(
             format(entry.size(app.settings.size_kind), unit),
@@ -316,7 +316,7 @@ fn draw_largest(frame: &mut Frame, area: Rect, app: &App) {
     };
     // One line goes to the blank separator and one to the heading.
     let count = (area.height as usize).saturating_sub(2);
-    let items = model::largest_items(entry, count, app.settings.size_kind);
+    let items = model::largest_items(&app.cwd, entry, count, app.settings.size_kind);
     if items.is_empty() {
         return;
     }
@@ -324,7 +324,7 @@ fn draw_largest(frame: &mut Frame, area: Rect, app: &App) {
     let unit = app.settings.unit;
     let size_width = items
         .iter()
-        .map(|item| width(&format(item.size(app.settings.size_kind), unit)))
+        .map(|(_, item)| width(&format(item.size(app.settings.size_kind), unit)))
         .max()
         .unwrap_or(8);
 
@@ -332,7 +332,7 @@ fn draw_largest(frame: &mut Frame, area: Rect, app: &App) {
         Line::default(),
         Line::from(Span::styled("Largest items", theme::muted())),
     ];
-    lines.extend(items.iter().map(|item| {
+    lines.extend(items.iter().map(|(path, item)| {
         Line::from(vec![
             Span::raw("  "),
             Span::styled(
@@ -343,7 +343,7 @@ fn draw_largest(frame: &mut Frame, area: Rect, app: &App) {
                 theme::heading(),
             ),
             Span::raw("   "),
-            Span::styled(model::display_path(&item.path), theme::secondary()),
+            Span::styled(model::display_path(path), theme::secondary()),
         ])
     }));
 

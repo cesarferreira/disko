@@ -51,7 +51,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let focus = app
         .selected_row()
         .and_then(|row| row.path)
-        .or_else(|| app.current_entry().map(|entry| entry.path.clone()));
+        .or_else(|| app.current_entry().map(|_| app.cwd.clone()));
 
     if let Some(path) = &focus {
         rows.push((String::new(), String::new()));

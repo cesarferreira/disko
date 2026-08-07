@@ -682,8 +682,8 @@ fn app_over(root: &std::path::Path) -> App {
         },
         false,
     );
-    app.root = tree.path.clone();
-    app.cwd = tree.path.clone();
+    app.root = tree.root_path().to_path_buf();
+    app.cwd = tree.root_path().to_path_buf();
     app.tree = Some(tree);
     app.view = View::Overview;
     app

@@ -105,7 +105,9 @@ impl Default for RowOptions {
     }
 }
 
-pub fn rows(parent: &DiskEntry, options: &RowOptions) -> Vec<Row> {
+/// `parent_path` is where `parent` sits: entries below the root of a scan hold
+/// only their own name, so a row's full path is built here from the two.
+pub fn rows(parent_path: &Path, parent: &DiskEntry, options: &RowOptions) -> Vec<Row> {
     let total = parent.size(options.size_kind);
 
     // Rank by size first and keep that index on every row: colours in the
@@ -137,7 +139,7 @@ pub fn rows(parent: &DiskEntry, options: &RowOptions) -> Vec<Row> {
     let mut rows: Vec<Row> = visible
         .iter()
         .map(|(rank, entry)| Row {
-            path: Some(entry.path.clone()),
+            path: Some(parent_path.join(entry.name_os())),
             name: entry.name().to_string(),
             size: entry.size(options.size_kind),
             delta: None,
@@ -248,11 +250,16 @@ pub fn growth_rows(node: &ChangeNode, options: &RowOptions) -> Vec<Row> {
 ///
 /// Direct children answer *what* is big ("Users"), grandchildren answer where
 /// to actually go ("~/Downloads").
-pub fn largest_items(parent: &DiskEntry, count: usize, size_kind: SizeKind) -> Vec<&DiskEntry> {
+pub fn largest_items<'a>(
+    parent_path: &Path,
+    parent: &'a DiskEntry,
+    count: usize,
+    size_kind: SizeKind,
+) -> Vec<(PathBuf, &'a DiskEntry)> {
     parent
-        .largest_at_depth(2, count, size_kind)
+        .largest_at_depth(parent_path, 2, count, size_kind)
         .into_iter()
-        .filter(|entry| entry.size(size_kind) > 0)
+        .filter(|(_, entry)| entry.size(size_kind) > 0)
         .collect()
 }
 
@@ -317,7 +324,7 @@ mod tests {
     #[test]
     fn rows_are_largest_first_with_shares_of_the_parent() {
         let tree = sample();
-        let rows = rows(&tree, &RowOptions::default());
+        let rows = rows(Path::new("/root"), &tree, &RowOptions::default());
 
         assert_eq!(
             rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
@@ -330,6 +337,7 @@ mod tests {
     fn the_tail_folds_into_one_other_row() {
         let tree = sample();
         let rows = rows(
+            Path::new("/root"),
             &tree,
             &RowOptions {
                 top: Some(1),
@@ -348,8 +356,9 @@ mod tests {
     #[test]
     fn colours_stay_put_when_the_sort_changes() {
         let tree = sample();
-        let by_size = rows(&tree, &RowOptions::default());
+        let by_size = rows(Path::new("/root"), &tree, &RowOptions::default());
         let by_name = rows(
+            Path::new("/root"),
             &tree,
             &RowOptions {
                 sort: Sort::Name,
@@ -371,6 +380,7 @@ mod tests {
     fn filtering_shows_matches_and_drops_the_other_row() {
         let tree = sample();
         let rows = rows(
+            Path::new("/root"),
             &tree,
             &RowOptions {
                 top: Some(1),
@@ -388,6 +398,7 @@ mod tests {
     fn filtering_is_case_insensitive() {
         let tree = sample();
         let rows = rows(
+            Path::new("/root"),
             &tree,
             &RowOptions {
                 filter: Some("GAM".to_string()),
@@ -402,6 +413,7 @@ mod tests {
     fn sorting_by_items_still_pins_other_last() {
         let tree = sample();
         let rows = rows(
+            Path::new("/root"),
             &tree,
             &RowOptions {
                 top: Some(1),
@@ -416,7 +428,7 @@ mod tests {
     #[test]
     fn an_empty_directory_produces_no_rows() {
         let tree = parent(vec![]);
-        assert!(rows(&tree, &RowOptions::default()).is_empty());
+        assert!(rows(Path::new("/root"), &tree, &RowOptions::default()).is_empty());
     }
 
     #[test]

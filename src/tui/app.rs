@@ -313,7 +313,12 @@ impl App {
             // directory with two million things under it. Keep the part the
             // screen can actually reach and let go of the rest; `absorb_scan`
             // puts the full tree back in a moment.
-            self.tree = Some(visible_stub(&previous, &self.cwd, REFRESH_KEEP_DEPTH));
+            self.tree = Some(visible_stub(
+                &self.root,
+                &previous,
+                &self.cwd,
+                REFRESH_KEEP_DEPTH,
+            ));
         }
 
         let (progress, cancel, handle) = scan::scan_in_background_streaming(
@@ -537,7 +542,7 @@ impl App {
             };
         }
         match self.current_entry() {
-            Some(entry) => model::rows(entry, &self.row_options(cap)),
+            Some(entry) => model::rows(&self.cwd, entry, &self.row_options(cap)),
             None => Vec::new(),
         }
     }
@@ -964,7 +969,7 @@ impl App {
             }
         } else {
             match self.current_entry() {
-                Some(entry) => build_radial(entry, key.size_kind, key.rings, &mut ids),
+                Some(entry) => build_radial(&self.cwd, entry, key.size_kind, key.rings, &mut ids),
                 None => RadialNode::leaf(0, "", 0),
             }
         };
@@ -1011,27 +1016,28 @@ impl App {
 /// Everything else is dropped. The numbers that survive are the same numbers
 /// the last scan produced — this trades depth the view is not showing for the
 /// memory a second full tree would need.
-fn visible_stub(entry: &DiskEntry, cwd: &Path, below: usize) -> DiskEntry {
+fn visible_stub(path: &Path, entry: &DiskEntry, cwd: &Path, below: usize) -> DiskEntry {
     let mut stub = entry.without_children();
 
-    if entry.path.starts_with(cwd) {
+    if path.starts_with(cwd) {
         // At or under the cursor: a few levels is everything that is drawn.
         if below > 0 {
             stub.children = entry
                 .children
                 .iter()
-                .map(|child| visible_stub(child, cwd, below - 1))
+                .map(|child| visible_stub(&path.join(child.name_os()), child, cwd, below - 1))
                 .collect();
         }
-    } else if cwd.starts_with(&entry.path) {
+    } else if cwd.starts_with(path) {
         // Above the cursor: keep every child, so going back up still lists the
         // same rows, but only follow the one that leads back down to it.
         stub.children = entry
             .children
             .iter()
             .map(|child| {
-                if cwd.starts_with(&child.path) {
-                    visible_stub(child, cwd, below)
+                let child_path = path.join(child.name_os());
+                if cwd.starts_with(&child_path) {
+                    visible_stub(&child_path, child, cwd, below)
                 } else {
                     child.without_children()
                 }
@@ -1043,13 +1049,14 @@ fn visible_stub(entry: &DiskEntry, cwd: &Path, below: usize) -> DiskEntry {
 }
 
 fn build_radial(
+    path: &Path,
     entry: &DiskEntry,
     kind: SizeKind,
     rings: usize,
     ids: &mut Vec<PathBuf>,
 ) -> RadialNode {
     let id = ids.len();
-    ids.push(entry.path.clone());
+    ids.push(path.to_path_buf());
 
     let mut children = Vec::new();
     if rings > 0 {
@@ -1061,7 +1068,7 @@ fn build_radial(
         });
         children = sorted
             .into_iter()
-            .map(|child| build_radial(child, kind, rings - 1, ids))
+            .map(|child| build_radial(&path.join(child.name_os()), child, kind, rings - 1, ids))
             .collect();
     }
 
@@ -1190,7 +1197,11 @@ mod tests {
                                 vec![entry("/root/a/deep/deeper/deepest", 400, vec![])],
                             )],
                         ),
-                        entry("/root/a/sibling", 100, vec![entry("/root/a/sibling/x", 1, vec![])]),
+                        entry(
+                            "/root/a/sibling",
+                            100,
+                            vec![entry("/root/a/sibling/x", 1, vec![])],
+                        ),
                     ],
                 ),
                 entry("/root/b", 300, vec![entry("/root/b/hidden", 50, vec![])]),
@@ -1200,7 +1211,7 @@ mod tests {
 
     #[test]
     fn a_stub_keeps_the_levels_under_the_cursor() {
-        let stub = visible_stub(&deep_tree(), Path::new("/root/a"), 2);
+        let stub = visible_stub(Path::new("/root"), &deep_tree(), Path::new("/root/a"), 2);
         let a = stub.child("a").unwrap();
 
         // Two levels under the cursor survive with their sizes intact...
@@ -1208,23 +1219,29 @@ mod tests {
         let deeper = a.child("deep").unwrap().child("deeper").unwrap();
         assert_eq!(deeper.allocated_size, 500);
         // ...and the third does not.
-        assert!(deeper.children.is_empty(), "the stub stops at the depth asked for");
+        assert!(
+            deeper.children.is_empty(),
+            "the stub stops at the depth asked for"
+        );
     }
 
     #[test]
     fn a_stub_keeps_enough_to_go_back_up() {
-        let stub = visible_stub(&deep_tree(), Path::new("/root/a"), 2);
+        let stub = visible_stub(Path::new("/root"), &deep_tree(), Path::new("/root/a"), 2);
 
         // Leaving `/root/a` must still list the same rows it listed before,
         // with the same numbers, even though nothing under them is kept.
         let b = stub.child("b").unwrap();
         assert_eq!(b.allocated_size, 300);
-        assert!(b.children.is_empty(), "a branch off the path is not followed");
+        assert!(
+            b.children.is_empty(),
+            "a branch off the path is not followed"
+        );
     }
 
     #[test]
     fn a_stub_at_the_root_is_bounded_by_depth() {
-        let stub = visible_stub(&deep_tree(), Path::new("/root"), 1);
+        let stub = visible_stub(Path::new("/root"), &deep_tree(), Path::new("/root"), 1);
 
         assert_eq!(stub.allocated_size, 1000);
         assert_eq!(stub.children.len(), 2);

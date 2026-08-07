@@ -292,7 +292,7 @@ pub fn last_snapshot(path: &Path) -> Option<disko_core::Snapshot> {
 pub fn record_and_diff(tree: &DiskEntry, kind: SizeKind, record: bool) -> Option<Diff> {
     let store = Store::open().ok()?;
     let now = history::now();
-    let previous = store.latest(&tree.path);
+    let previous = store.latest(tree.root_path());
 
     if record {
         let _ = store.record(tree);

@@ -214,12 +214,18 @@ pub fn diff(
     before_floor: u64,
 ) -> Diff {
     Diff {
-        root: after.path.clone(),
+        root: after.root_path().to_path_buf(),
         before_at,
         after_at,
         before_total: before.size(kind),
         after_total: after.size(kind),
-        tree: compare(Some(before), Some(after), &after.path, kind, before_floor),
+        tree: compare(
+            Some(before),
+            Some(after),
+            after.root_path(),
+            kind,
+            before_floor,
+        ),
     }
 }
 
@@ -249,24 +255,15 @@ fn compare(
     let mut pairs: BTreeMap<&std::ffi::OsStr, (Option<&DiskEntry>, Option<&DiskEntry>)> =
         BTreeMap::new();
     for entry in before.into_iter().flat_map(|entry| entry.children.iter()) {
-        if let Some(name) = entry.path.file_name() {
-            pairs.entry(name).or_default().0 = Some(entry);
-        }
+        pairs.entry(entry.name_os()).or_default().0 = Some(entry);
     }
     for entry in after.into_iter().flat_map(|entry| entry.children.iter()) {
-        if let Some(name) = entry.path.file_name() {
-            pairs.entry(name).or_default().1 = Some(entry);
-        }
+        pairs.entry(entry.name_os()).or_default().1 = Some(entry);
     }
 
     let children = pairs
         .into_iter()
-        .map(|(name, (old, new))| {
-            let child_path = new
-                .map(|entry| entry.path.clone())
-                .unwrap_or_else(|| path.join(name));
-            compare(old, new, &child_path, kind, floor)
-        })
+        .map(|(name, (old, new))| compare(old, new, &path.join(name), kind, floor))
         .collect();
 
     ChangeNode { change, children }
