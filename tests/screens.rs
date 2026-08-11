@@ -651,7 +651,10 @@ impl Sandbox {
         std::fs::create_dir_all(path.join("keep")).unwrap();
         std::fs::write(path.join("cache/blob"), vec![b'x'; 4000]).unwrap();
         std::fs::write(path.join("keep/notes"), vec![b'x'; 100]).unwrap();
-        Self(path)
+        // A scan canonicalises its root, and on macOS the temp directory lives
+        // behind a symlink (/var -> /private/var). Without this, paths built
+        // from the sandbox would not match the scanned tree's own.
+        Self(path.canonicalize().unwrap())
     }
 }
 

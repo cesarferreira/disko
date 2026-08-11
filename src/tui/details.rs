@@ -10,18 +10,14 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::deletion::Outcome;
 use crate::model;
 use crate::tui::app::App;
-use crate::tui::theme;
+use crate::tui::{text, theme};
+
+/// How wide the panel would like to be, before the terminal has its say.
+const PANEL_WIDTH: u16 = 66;
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let mut rows: Vec<(String, String)> = Vec::new();
     let unit = app.settings.unit;
-
-    if !app.outcomes.is_empty() {
-        for outcome in &app.outcomes {
-            rows.push((model::display_path(outcome.path()), outcome.detail()));
-        }
-        rows.push((String::new(), String::new()));
-    }
 
     if let Some(fs) = &app.filesystem {
         rows.push(("Volume".into(), fs.name.clone()));
@@ -115,48 +111,82 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
-    if rows.is_empty() {
+    if rows.is_empty() && app.outcomes.is_empty() {
         return;
     }
 
-    let popup = centered(area, 66, rows.len() as u16 + 2);
+    // The report of the last deletion sits above the description, separated by
+    // a blank line, so both are counted when sizing the popup.
+    let leading = if app.outcomes.is_empty() {
+        0
+    } else {
+        app.outcomes.len() + 1
+    };
+    let popup = centered(area, PANEL_WIDTH, (leading + rows.len()) as u16 + 2);
     frame.render_widget(Clear, popup);
-    let outcome_count = app.outcomes.len();
+
+    let mut lines = outcome_lines(&app.outcomes, popup.width.saturating_sub(2) as usize);
+    if leading > 0 {
+        lines.push(Line::default());
+    }
+    lines.extend(rows.into_iter().map(|(label, value)| {
+        Line::from(vec![
+            Span::styled(format!(" {label:<11} "), theme::muted()),
+            Span::raw(value),
+        ])
+    }));
+
     frame.render_widget(
-        Paragraph::new(
-            rows.into_iter()
-                .enumerate()
-                .map(|(index, (label, value))| {
-                    let (value_span, label_span) = if outcome_count > 0 && index < outcome_count {
-                        let style = match &app.outcomes[index] {
-                            Outcome::Deleted { .. } => theme::muted(),
-                            _ => theme::warning(),
-                        };
-                        (
-                            Span::styled(value, style),
-                            Span::styled(format!(" {label:<11}"), theme::muted()),
-                        )
-                    } else {
-                        (
-                            Span::raw(value),
-                            Span::styled(format!(" {label:<11}"), theme::muted()),
-                        )
-                    };
-                    Line::from(vec![label_span, value_span])
-                })
-                .collect::<Vec<_>>(),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(if app.outcomes.is_empty() {
-                    " Details — d to close "
-                } else {
-                    " Details — last deletion — d to close "
-                }),
-        ),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(
+            if app.outcomes.is_empty() {
+                " Details — d to close "
+            } else {
+                " Details — last deletion — d to close "
+            },
+        )),
         popup,
     );
+}
+
+/// One line per target: what happened to it, and to which path.
+///
+/// The reason is the whole point of the report — a refusal nobody can read is
+/// no better than a silent one — so it claims its width first and the paths
+/// share what is left, losing their middles if they must.
+fn outcome_lines(outcomes: &[Outcome], inner: usize) -> Vec<Line<'static>> {
+    if outcomes.is_empty() {
+        return Vec::new();
+    }
+    // A leading space, and one between the two columns.
+    let room = inner.saturating_sub(2);
+    // Even the longest reason leaves the path something to work with.
+    let reasons: Vec<String> = outcomes
+        .iter()
+        .map(|outcome| text::truncate(&outcome.detail(), room.saturating_sub(12).max(1)))
+        .collect();
+    let widest = reasons
+        .iter()
+        .map(|reason| text::width(reason))
+        .max()
+        .unwrap_or(0);
+    let paths = room.saturating_sub(widest).max(1);
+
+    outcomes
+        .iter()
+        .zip(reasons)
+        .map(|(outcome, reason)| {
+            let path = text::shorten_path(&model::display_path(outcome.path()), paths);
+            let style = if outcome.succeeded() {
+                theme::muted()
+            } else {
+                theme::warning()
+            };
+            Line::from(vec![
+                Span::styled(format!(" {} ", text::pad(&path, paths)), theme::muted()),
+                Span::styled(reason, style),
+            ])
+        })
+        .collect()
 }
 
 /// The snapshot noise floor, recovered from any entry the diff knows was
