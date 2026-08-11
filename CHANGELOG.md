@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-08-11
+
+### 🐛 Bug Fixes
+
+- Keep the deletion reason legible, and match the scanned root on macOS
+
+### 💼 Other
+
+- Prompt for sudo if there are no permissions for deletion
 ## [0.7.0] - 2026-08-08
 
 ### 🚀 Features
