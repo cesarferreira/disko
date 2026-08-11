@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::deletion::Outcome;
 use crate::model;
 use crate::tui::app::App;
 use crate::tui::theme;
@@ -14,6 +15,13 @@ use crate::tui::theme;
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let mut rows: Vec<(String, String)> = Vec::new();
     let unit = app.settings.unit;
+
+    if !app.outcomes.is_empty() {
+        for outcome in &app.outcomes {
+            rows.push((model::display_path(outcome.path()), outcome.detail()));
+        }
+        rows.push((String::new(), String::new()));
+    }
 
     if let Some(fs) = &app.filesystem {
         rows.push(("Volume".into(), fs.name.clone()));
@@ -113,21 +121,39 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
 
     let popup = centered(area, 66, rows.len() as u16 + 2);
     frame.render_widget(Clear, popup);
+    let outcome_count = app.outcomes.len();
     frame.render_widget(
         Paragraph::new(
             rows.into_iter()
-                .map(|(label, value)| {
-                    Line::from(vec![
-                        Span::styled(format!(" {label:<11}"), theme::muted()),
-                        Span::raw(value),
-                    ])
+                .enumerate()
+                .map(|(index, (label, value))| {
+                    let (value_span, label_span) = if outcome_count > 0 && index < outcome_count {
+                        let style = match &app.outcomes[index] {
+                            Outcome::Deleted { .. } => theme::muted(),
+                            _ => theme::warning(),
+                        };
+                        (
+                            Span::styled(value, style),
+                            Span::styled(format!(" {label:<11}"), theme::muted()),
+                        )
+                    } else {
+                        (
+                            Span::raw(value),
+                            Span::styled(format!(" {label:<11}"), theme::muted()),
+                        )
+                    };
+                    Line::from(vec![label_span, value_span])
                 })
                 .collect::<Vec<_>>(),
         )
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Details — d to close "),
+                .title(if app.outcomes.is_empty() {
+                    " Details — d to close "
+                } else {
+                    " Details — last deletion — d to close "
+                }),
         ),
         popup,
     );

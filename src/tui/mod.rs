@@ -196,9 +196,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Any deliberate keystroke means the last message has been read.
-    app.status = None;
-    app.outcomes.clear();
+    // Any deliberate keystroke means the last message has been read — except
+    // `d`, which opens the panel that lists what the last deletion did.
+    let opens_deletion_log = matches!(key.code, KeyCode::Char('d'))
+        && matches!(app.view, View::Overview | View::Explorer);
+    if !opens_deletion_log {
+        app.status = None;
+        app.outcomes.clear();
+    }
 
     match app.view {
         View::Picker => handle_picker(app, key),
@@ -369,6 +374,25 @@ mod tests {
         // Escape at the top does not quit by accident.
         handle_key(&mut app, press(KeyCode::Esc));
         assert!(!app.quit);
+    }
+
+    #[test]
+    fn d_keeps_the_deletion_log_until_something_else_is_pressed() {
+        let mut app = test_app();
+        app.outcomes = vec![crate::deletion::Outcome::Refused {
+            path: PathBuf::from("/root/big"),
+            reason: crate::deletion::Refusal::MountPoint,
+        }];
+        app.status = Some("nothing deleted".into());
+
+        handle_key(&mut app, press(KeyCode::Char('d')));
+        assert!(app.details);
+        assert_eq!(app.outcomes.len(), 1);
+        assert!(app.status.is_some());
+
+        handle_key(&mut app, press(KeyCode::Char('j')));
+        assert!(app.outcomes.is_empty());
+        assert!(app.status.is_none());
     }
 
     #[test]

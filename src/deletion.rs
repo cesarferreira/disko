@@ -232,6 +232,29 @@ pub enum Outcome {
     Failed { path: PathBuf, error: String },
 }
 
+impl Outcome {
+    pub fn path(&self) -> &Path {
+        match self {
+            Outcome::Deleted { path, .. }
+            | Outcome::Refused { path, .. }
+            | Outcome::Failed { path, .. } => path,
+        }
+    }
+
+    pub fn succeeded(&self) -> bool {
+        matches!(self, Outcome::Deleted { .. })
+    }
+
+    /// Short explanation for the status bar or the details panel.
+    pub fn detail(&self) -> String {
+        match self {
+            Outcome::Deleted { .. } => "deleted".into(),
+            Outcome::Refused { reason, .. } => reason.to_string(),
+            Outcome::Failed { error, .. } => error.clone(),
+        }
+    }
+}
+
 /// Delete every target that passes its check.
 ///
 /// Each path is re-checked immediately before it is removed, not when the list

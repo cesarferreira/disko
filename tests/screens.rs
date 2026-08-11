@@ -851,7 +851,14 @@ fn the_scan_root_itself_can_never_be_deleted() {
 
     assert!(sandbox.0.exists(), "the scanned folder must survive");
     let status = app.status.clone().unwrap();
-    assert!(status.contains("nothing could be deleted"), "{status}");
+    assert!(status.contains("nothing deleted"), "{status}");
+    assert!(status.contains("folder being scanned"), "{status}");
+    assert!(app.details, "total failure should open the log");
+    let screen = joined(&render_lines(&mut app, 100, 34).unwrap());
+    assert!(
+        screen.contains("last deletion") && screen.contains("folder being scanned"),
+        "{screen}"
+    );
 }
 
 #[test]

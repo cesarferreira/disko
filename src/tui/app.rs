@@ -18,6 +18,46 @@ use crate::model::{self, Metric, Row, RowOptions, Sort};
 /// The word that has to be typed before anything is removed.
 pub const CONFIRM_WORD: &str = "delete";
 
+fn deletion_status(
+    deleted: usize,
+    skipped: usize,
+    freed: u64,
+    outcomes: &[Outcome],
+    unit: Unit,
+) -> String {
+    let first_problem = outcomes.iter().find(|outcome| !outcome.succeeded());
+    let problem_hint = first_problem.map(|outcome| {
+        format!(
+            "{}: {}",
+            model::display_path(outcome.path()),
+            outcome.detail()
+        )
+    });
+
+    match (deleted, skipped) {
+        (0, _) => problem_hint
+            .map(|hint| format!("nothing deleted — {hint}"))
+            .unwrap_or_else(|| "nothing deleted — d for details".into()),
+        (n, 0) => format!(
+            "deleted {n} · freed {}",
+            disko_core::size::format(freed, unit)
+        ),
+        (n, 1) => {
+            let base = format!(
+                "deleted {n} · freed {} · 1 skipped",
+                disko_core::size::format(freed, unit)
+            );
+            problem_hint
+                .map(|hint| format!("{base} — {hint}"))
+                .unwrap_or(base)
+        }
+        (n, skipped) => format!(
+            "deleted {n} · freed {} · {skipped} skipped — d for details",
+            disko_core::size::format(freed, unit)
+        ),
+    }
+}
+
 /// How far down a running scan publishes finished directories. Two levels is
 /// enough that a scan of `/` shows `~/Library` long before `/` itself is done.
 const STREAM_DEPTH: usize = 2;
@@ -761,19 +801,19 @@ impl App {
                 self.marks.remove(path);
             }
         }
+
+        self.status = Some(deletion_status(
+            deleted,
+            refused,
+            freed,
+            &outcomes,
+            self.settings.unit,
+        ));
         self.outcomes = outcomes;
 
-        self.status = Some(match (deleted, refused) {
-            (0, _) => "nothing could be deleted — press d for why".to_string(),
-            (n, 0) => format!(
-                "deleted {n} · freed {}",
-                disko_core::size::format(freed, self.settings.unit)
-            ),
-            (n, skipped) => format!(
-                "deleted {n} · freed {} · {skipped} skipped",
-                disko_core::size::format(freed, self.settings.unit)
-            ),
-        });
+        if deleted == 0 && !self.outcomes.is_empty() {
+            self.details = true;
+        }
 
         // The row under the cursor may have just been removed.
         let rows = self.rows().len();
