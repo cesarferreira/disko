@@ -66,6 +66,12 @@ Requires [Rust](https://rustup.rs) **1.85+** and `~/.cargo/bin` on your `PATH`.
 cargo install disko-cli
 ```
 
+On NetBSD, disko is in pkgsrc:
+
+```bash
+pkgin install disko
+```
+
 Verify:
 
 ```bash
@@ -432,7 +438,8 @@ a section that eats the list at 12 rows — fail the build rather than the user.
 
 macOS and Linux. Windows compiles but is untested and ships no release binary:
 allocated sizes, hard-link dedup and the mount table all fall back to
-approximations there.
+approximations there. Also packaged for NetBSD via
+[pkgsrc](https://pkgsrc.se/sysutils/disko) (thanks to [pin](https://github.com/0323pin)).
 
 ## License
 
