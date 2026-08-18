@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] - 2026-08-18
+
+### 💼 Other
+
+- Added link to NetBSD support
 ## [0.8.0] - 2026-08-11
 
 ### 🐛 Bug Fixes
